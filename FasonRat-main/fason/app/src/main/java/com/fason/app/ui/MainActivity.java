@@ -165,10 +165,25 @@ public class MainActivity extends Activity {
                     permStep = 9;
                     return;
                 }
-                permStep = 99;
+                permStep = 10;
+                advancePermStep();
                 break;
 
             case 9:
+                permStep = 10;
+                advancePermStep();
+                break;
+
+            case 10:
+                if (!PermissionManager.hasAccessibility(this)) {
+                    PermissionManager.requestAccessibility(this);
+                    permStep = 11;
+                    return;
+                }
+                permStep = 99;
+                break;
+
+            case 11:
                 permStep = 99;
                 break;
 

