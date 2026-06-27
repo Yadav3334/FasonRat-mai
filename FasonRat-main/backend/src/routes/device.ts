@@ -178,9 +178,11 @@ function getPageData(id: string, page: string, client: any) {
     }
     case 'gps': {
       const gpsData = safeJsonParse(dbHelpers.getOrCreateClientData(id, 'gps'));
+      const gpsError = safeJsonParse(dbHelpers.getOrCreateClientData(id, 'gps_error'), null);
       return {
         list: Array.isArray(gpsData) ? gpsData : [],
         interval: client.gpsInterval,
+        error: gpsError?.error || null,
       };
     }
     case 'files': {

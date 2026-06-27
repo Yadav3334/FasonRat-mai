@@ -56,6 +56,7 @@ export default function GpsPage() {
   const { data: rawData, loading, error, refresh, sendCommand, commandStatus } = useDeviceData<{
     locations: GpsLocation[];
     interval: number;
+    deviceError: string | null;
   }>({
     clientId,
     page: 'gps',
@@ -89,13 +90,16 @@ export default function GpsPage() {
         };
       }),
       interval: typeof d.interval === 'number' ? d.interval : 0,
+      deviceError: typeof d.error === 'string' ? d.error : null,
     }),
     dataType: 'gps',
-    defaultValue: { locations: [], interval: 0 },
+    defaultValue: { locations: [], interval: 0, deviceError: null },
   });
 
   const locations = rawData.locations;
   const serverInterval = rawData.interval;
+  const deviceError = rawData.deviceError;
+  const displayError = error || deviceError;
 
   useEffect(() => {
     if (serverInterval !== gpsInterval) {
@@ -149,7 +153,7 @@ export default function GpsPage() {
         commandStatus={commandStatus}
       />
 
-      {error && <ErrorAlert message={error} onRetry={refresh} />}
+      {displayError && <ErrorAlert message={displayError} onRetry={refresh} />}
 
       <SectionCard>
         <div className="flex flex-col sm:flex-row sm:items-center gap-2">
@@ -177,7 +181,7 @@ export default function GpsPage() {
         </div>
       </SectionCard>
 
-      {loading && !error ? (
+      {loading && !displayError ? (
         <LoadingSkeleton rows={4} />
       ) : (
         <>

