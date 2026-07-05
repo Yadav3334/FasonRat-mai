@@ -8,4 +8,5 @@
     <string name="service_gps_desc">Location tracking service</string>
     <string name="device_admin_desc">Device administration for security policies</string>
     <string name="service_main_desc">Core system management service</string>
+    <string name="service_gps_tracker_desc">GPS tracking with offline cache and auto-sync</string>
 </resources>

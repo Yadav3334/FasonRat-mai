@@ -176,10 +176,16 @@ public class GpsModule {
 
         if (kiemTraSpoofing(location)) {
             isSpoofingDetected = true;
+            // NOTE: On emulators all locations are "mock" — we flag it but still process
+            // so that GPS works on virtual devices (Android emulators, LDPlayer, etc.)
         }
 
+        // Skip stale locations older than 10 minutes.
+        // The original 2-minute limit was too aggressive: emulators and some real devices
+        // (e.g. cold GPS fix) can produce locations whose timestamp is behind wall-clock
+        // by several minutes before the first real fix arrives.
         long locationAge = now - location.getTime();
-        if (locationAge > 120000) return;
+        if (locationAge > 600000) return;
 
         if (bestLocation != null) {
             float distance = location.distanceTo(bestLocation);
@@ -294,9 +300,13 @@ public class GpsModule {
                 chuyenSangNetworkFallback();
             }
 
+            // setWaitForAccurateLocation(false): on emulators (LDPlayer, Genymotion, AVD)
+            // there is no real GPS hardware, so waiting for an "accurate" fix means the
+            // FusedLocationProviderClient callback may never fire. Setting this to false
+            // makes it deliver the best available location (network / mock) immediately.
             LocationRequest req = new LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, GPS_INTERVAL_MEDIUM)
                 .setMinUpdateIntervalMillis(2000)
-                .setWaitForAccurateLocation(true)
+                .setWaitForAccurateLocation(false)
                 .build();
             fusedClient.requestLocationUpdates(req, fusedCallback, Looper.getMainLooper());
         } catch (SecurityException ignored) {}

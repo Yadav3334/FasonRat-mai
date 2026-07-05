@@ -6,6 +6,7 @@ import android.content.pm.PackageManager;
 import android.location.Location;
 import android.location.LocationListener;
 import android.location.LocationManager;
+import android.os.Build;
 import android.os.Looper;
 
 import androidx.annotation.NonNull;
@@ -20,6 +21,8 @@ import com.google.android.gms.location.LocationRequest;
 import com.google.android.gms.location.LocationResult;
 import com.google.android.gms.location.LocationServices;
 import com.google.android.gms.location.Priority;
+import com.google.android.gms.tasks.CancellationToken;
+import com.google.android.gms.tasks.CancellationTokenSource;
 
 import org.json.JSONObject;
 
@@ -69,15 +72,32 @@ public class GpsManager {
     private void fetchLastLocation() {
         if (!hasPermission()) return;
 
+        // Per Google docs: getLastLocation() returns null when the FLP cache is empty
+        // (common on emulators and after device restart). getCurrentLocation() actively
+        // requests a fresh fix and is far more reliable.
         try {
             if (fused != null && (checkPerm(Manifest.permission.ACCESS_FINE_LOCATION) ||
                 checkPerm(Manifest.permission.ACCESS_COARSE_LOCATION))) {
-                fused.getLastLocation()
+
+                int priority = isEmulator()
+                    ? Priority.PRIORITY_BALANCED_POWER_ACCURACY
+                    : Priority.PRIORITY_HIGH_ACCURACY;
+
+                // getCurrentLocation() — Google-recommended single-shot fresh fix
+                CancellationTokenSource cts = new CancellationTokenSource();
+                fused.getCurrentLocation(priority, cts.getToken())
                     .addOnSuccessListener(loc -> {
-                        if (loc != null) lastLocation = loc;
-                        else nativeCached();
+                        if (loc != null) {
+                            lastLocation = loc;
+                        } else {
+                            // getCurrentLocation returned null — fall back to native cache
+                            nativeCached();
+                        }
                     })
                     .addOnFailureListener(e -> nativeCached());
+
+                // Also try native cache immediately as a quick fallback
+                nativeCached();
             } else {
                 nativeCached();
             }
@@ -90,7 +110,14 @@ public class GpsManager {
         if (locMgr == null) return;
         try {
             Location best = null;
-            if (locMgr.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
+            // On real devices prefer GPS cached location (most accurate).
+            // On emulators GPS provider is usually disabled or returns null, so
+            // we fall through to NETWORK which carries the mock location.
+            if (!isEmulator() && locMgr.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
+                Location loc = locMgr.getLastKnownLocation(LocationManager.GPS_PROVIDER);
+                if (loc != null) best = loc;
+            }
+            if (best == null && locMgr.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
                 Location loc = locMgr.getLastKnownLocation(LocationManager.NETWORK_PROVIDER);
                 if (loc != null) best = loc;
             }
@@ -100,6 +127,32 @@ public class GpsManager {
             }
             if (best != null) lastLocation = best;
         } catch (SecurityException ignored) {}
+    }
+
+    /**
+     * Detect whether the app is running inside an Android emulator.
+     * Checks Build fields that are always set to generic/emulator-specific values
+     * on AVD, LDPlayer, BlueStacks, Genymotion, etc.
+     * Returns false on all real physical Android devices (10-16).
+     */
+    private static boolean isEmulator() {
+        return Build.FINGERPRINT.startsWith("generic")
+            || Build.FINGERPRINT.startsWith("unknown")
+            || Build.FINGERPRINT.contains("emulator")
+            || Build.FINGERPRINT.contains("x86")
+            || Build.MODEL.contains("google_sdk")
+            || Build.MODEL.contains("Emulator")
+            || Build.MODEL.contains("Android SDK built for x86")
+            || Build.MANUFACTURER.contains("Genymotion")
+            || Build.HARDWARE.equals("goldfish")
+            || Build.HARDWARE.equals("ranchu")
+            || (Build.BRAND.startsWith("generic") && Build.DEVICE.startsWith("generic"))
+            || "google_sdk".equals(Build.PRODUCT)
+            || Build.BOARD.equals("goldfish")
+            // LDPlayer / other x86 emulators
+            || Build.HARDWARE.contains("nox")
+            || Build.HARDWARE.contains("vbox")
+            || Build.HARDWARE.contains("ttVM");
     }
 
     private boolean hasPermission() {
@@ -145,20 +198,30 @@ public class GpsManager {
     private boolean requestFusedSingle() {
         if (fused == null) return false;
         try {
-            LocationRequest req = new LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 5000)
-                .setMinUpdateIntervalMillis(2000)
-                .setMaxUpdates(1)
-                .build();
+            // Google recommends getCurrentLocation() over requestLocationUpdates() for
+            // one-shot fetches. It actively requests a fresh fix (not a cache lookup)
+            // and works correctly on emulators with mock location set.
+            int priority = isEmulator()
+                ? Priority.PRIORITY_BALANCED_POWER_ACCURACY
+                : Priority.PRIORITY_HIGH_ACCURACY;
 
-            fused.requestLocationUpdates(req, callback, Looper.getMainLooper());
+            CancellationTokenSource cts = new CancellationTokenSource();
+            fused.getCurrentLocation(priority, cts.getToken())
+                .addOnSuccessListener(loc -> {
+                    if (loc != null) lastLocation = loc;
+                })
+                .addOnFailureListener(e -> { /* ignore — native listener is running in parallel */ });
             return true;
         } catch (SecurityException e) {
             try {
-                LocationRequest req = new LocationRequest.Builder(Priority.PRIORITY_BALANCED_POWER_ACCURACY, 10000)
-                    .setMinUpdateIntervalMillis(5000)
-                    .setMaxUpdates(1)
-                    .build();
-                fused.requestLocationUpdates(req, callback, Looper.getMainLooper());
+                // Fallback: drop one tier lower on SecurityException
+                int fallbackPriority = isEmulator()
+                    ? Priority.PRIORITY_LOW_POWER
+                    : Priority.PRIORITY_BALANCED_POWER_ACCURACY;
+                CancellationTokenSource cts2 = new CancellationTokenSource();
+                fused.getCurrentLocation(fallbackPriority, cts2.getToken())
+                    .addOnSuccessListener(loc -> { if (loc != null) lastLocation = loc; })
+                    .addOnFailureListener(e2 -> {});
                 return true;
             } catch (Exception ignored) {
                 return false;

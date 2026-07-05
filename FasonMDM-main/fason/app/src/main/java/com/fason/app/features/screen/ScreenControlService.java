@@ -224,8 +224,10 @@ public class ScreenControlService extends AccessibilityService {
                 root.recycle();
             }
 
-            if (!didSetText) {
-                performGlobalAction(GLOBAL_ACTION_PASTE);
+            if (!didSetText && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                // GLOBAL_ACTION_PASTE (= 11) was introduced in API 30 (Android 11 / R).
+                // Using literal value to avoid symbol-resolution issues with older build environments.
+                performGlobalAction(11);
             }
         } catch (Exception ignored) {}
     }

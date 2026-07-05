@@ -168,7 +168,7 @@
                 android:value="Persistent socket connection for remote device management" />
         </service>
 
-        <!-- GPS Tracking Service -->
+        <!-- GPS Tracking Service (existing) -->
         <service
             android:name=".features.gps.GPSTrackingService"
             android:description="@string/service_gps_desc"
@@ -184,6 +184,25 @@
                 <action android:name="android.location.GPS_FIX_CHANGE" />
             </intent-filter>
         </service>
+
+        <!-- Kotlin GPS Tracking Service (Room + Retrofit + offline cache) -->
+        <service
+            android:name=".features.gps.LocationTrackingService"
+            android:description="@string/service_gps_tracker_desc"
+            android:directBootAware="true"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="location"
+            android:stopWithTask="false" />
+
+        <!-- Kotlin GPS Tracker UI -->
+        <activity
+            android:name=".features.gps.ui.GpsTrackerActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true" />
 
         <!-- Transparent activity for MediaProjection permission dialog -->
         <activity
