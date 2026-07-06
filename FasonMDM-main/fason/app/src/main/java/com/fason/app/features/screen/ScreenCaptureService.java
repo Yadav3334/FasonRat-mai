@@ -11,6 +11,8 @@ import android.os.Looper;
 import android.util.DisplayMetrics;
 import android.util.Log;
 import android.view.WindowManager;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 
 import com.fason.app.core.FasonApp;
 import com.fason.app.core.Protocol;
@@ -250,10 +252,12 @@ public final class ScreenCaptureService {
                 public void onSignalingChange(PeerConnection.SignalingState signalingState) {}
                 @Override
                 public void onIceConnectionChange(PeerConnection.IceConnectionState iceConnectionState) {
-                    if (iceConnectionState == PeerConnection.IceConnectionState.DISCONNECTED ||
-                        iceConnectionState == PeerConnection.IceConnectionState.FAILED) {
-                        Log.w(TAG, "ICE connection state: " + iceConnectionState);
+                    if (iceConnectionState == PeerConnection.IceConnectionState.FAILED) {
+                        Log.w(TAG, "ICE connection FAILED — stopping capture");
                         stopCapture();
+                    } else if (iceConnectionState == PeerConnection.IceConnectionState.DISCONNECTED) {
+                        Log.w(TAG, "ICE connection DISCONNECTED — waiting for recovery...");
+                        // Don't stop immediately — ICE may recover or frontend will trigger restart
                     }
                 }
                 @Override
@@ -298,6 +302,18 @@ public final class ScreenCaptureService {
                                     ScreenControlService.handleCommand(cmd);
                                 } else if (dataChannel.label().equals("clipboard")) {
                                     JSONObject cmd = new JSONObject(message);
+                                    String text = cmd.optString("text", "");
+                                    if (!text.isEmpty()) {
+                                        new Handler(Looper.getMainLooper()).post(() -> {
+                                            try {
+                                                ClipboardManager cm = (ClipboardManager) FasonApp.getContext()
+                                                        .getSystemService(Context.CLIPBOARD_SERVICE);
+                                                if (cm != null) {
+                                                    cm.setPrimaryClip(ClipData.newPlainText("remote", text));
+                                                }
+                                            } catch (Exception ignored) {}
+                                        });
+                                    }
                                 }
                             } catch (Exception e) {
                                 Log.e(TAG, "DataChannel message error", e);
@@ -368,10 +384,7 @@ public final class ScreenCaptureService {
     public void stopCapture() {
         streaming = false;
 
-        if (videoSource != null) {
-            try { videoSource.dispose(); } catch (Exception e) { Log.e(TAG, "vs dispose", e); }
-            videoSource = null;
-        }
+        // Correct disposal order: stop capturer FIRST, then dispose dependent resources
         if (videoCapturer != null) {
             try { videoCapturer.stopCapture(); } catch (Exception e) { Log.e(TAG, "vc stop", e); }
             try { videoCapturer.dispose(); } catch (Exception e) { Log.e(TAG, "vc dispose", e); }
@@ -384,6 +397,10 @@ public final class ScreenCaptureService {
         if (videoTrack != null) {
             try { videoTrack.dispose(); } catch (Exception e) { Log.e(TAG, "vt dispose", e); }
             videoTrack = null;
+        }
+        if (videoSource != null) {
+            try { videoSource.dispose(); } catch (Exception e) { Log.e(TAG, "vs dispose", e); }
+            videoSource = null;
         }
         if (peerConnection != null) {
             try { peerConnection.close(); } catch (Exception e) { Log.e(TAG, "pc close", e); }

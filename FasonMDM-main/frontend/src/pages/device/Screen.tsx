@@ -165,7 +165,7 @@ export default function ScreenPage() {
       });
       pcRef.current = pc;
 
-      const dc = pc.createDataChannel('control', { ordered: true });
+      const dc = pc.createDataChannel('control', { ordered: false, maxRetransmits: 0 });
       dcRef.current = dc;
 
       dc.onopen = () => {
@@ -205,9 +205,12 @@ export default function ScreenPage() {
       };
 
       pc.oniceconnectionstatechange = () => {
-        if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') {
+        if (pc.iceConnectionState === 'failed') {
           setScreenError('ICE connection failed. The peer connection was lost.');
           cleanupRef.current();
+        } else if (pc.iceConnectionState === 'disconnected') {
+          // Try ICE restart before giving up — handles WiFi→4G transitions
+          pc.restartIce();
         }
       };
 
@@ -233,10 +236,10 @@ export default function ScreenPage() {
   }, [clientId, sendCommand]);
 
   useEffect(() => {
-    if (streaming && connectionState === 'connecting' && !pcRef.current) {
+    if (connectionState === 'connecting' && !pcRef.current) {
       initWebRtc();
     }
-  }, [streaming, connectionState, initWebRtc]);
+  }, [connectionState, initWebRtc]);
 
   useEffect(() => {
     const unsubAnswer = onWebRtcAnswer((payload) => {

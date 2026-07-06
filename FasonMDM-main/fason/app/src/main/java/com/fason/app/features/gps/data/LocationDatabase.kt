@@ -5,7 +5,7 @@ import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
 
-@Database(entities = [LocationEntity::class], version = 1, exportSchema = false)
+@Database(entities = [LocationEntity::class], version = 3, exportSchema = false)
 abstract class LocationDatabase : RoomDatabase() {
 
     abstract fun locationDao(): LocationDao
@@ -21,7 +21,9 @@ abstract class LocationDatabase : RoomDatabase() {
                     LocationDatabase::class.java,
                     "location_cache.db"
                 )
-                    .fallbackToDestructiveMigration()
+                    // Nếu app đang ở bản Production (có người dùng), hãy thay thế dòng dưới bằng 
+                    // .addMigrations(MIGRATION_1_2) để không mất dữ liệu offline cũ.
+                    .fallbackToDestructiveMigration() 
                     .build()
                     .also { INSTANCE = it }
             }

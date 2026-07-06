@@ -31,8 +31,10 @@ import java.util.LinkedList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.TimeZone;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ConcurrentLinkedDeque;
+import java.util.concurrent.atomic.AtomicLong;
 
 public class GpsModule {
     private static final String TAG = "GpsModule";
@@ -41,45 +43,49 @@ public class GpsModule {
     private static final float MIN_DISTANCE = 1.0f;
     private static final int MAX_TRACK_HISTORY = 10000;
     private static final int MAX_TRIGGERED_EVENTS = 1000;
-    // Minimum radius must be > 50m for enter hysteresis (radius - 50) to work
     private static final float MIN_GEOFENCE_RADIUS = 60f;
+    private static final long SPOOFING_RESET_TIME_MS = 60_000; // Reset spoofing flag sau 60s
 
-    private Context ctx;
-    private LocationManager locationManager;
-    private FusedLocationProviderClient fusedClient;
-    private SharedPreferences prefs;
+    private final Context ctx;
+    private final LocationManager locationManager;
+    private final FusedLocationProviderClient fusedClient;
+    private final SharedPreferences prefs;
 
     private LocationCallback fusedCallback;
     private LocationListener gpsListener;
     private LocationListener networkListener;
     private GnssStatus.Callback gnssStatusCallback;
 
-    private Location bestLocation = null;
-    private boolean isTracking = false;
-    private int satelliteCount = 0;
-    private int satelliteUsed = 0;
-    private float currentAccuracy = Float.MAX_VALUE;
-    private float currentSpeed = 0;
-    private float currentBearing = 0;
-    private float totalDistance = 0;
-    private double currentAltitude = 0;
-    private long lastUpdateTime = 0;
+    // --- Thread-Safe Shared State ---
+    private volatile Location bestLocation = null;
+    private volatile boolean isTracking = false;
+    private volatile int satelliteCount = 0;
+    private volatile int satelliteUsed = 0;
+    private volatile float currentSpeed = 0;
+    private volatile float currentBearing = 0;
+    private volatile double currentAltitude = 0;
+    private volatile long lastUpdateTime = 0;
+    private volatile long spoofingDetectedAt = 0;
 
-    // Synchronized LinkedList: O(1) add/removeFirst, avoids CopyOnWriteArrayList's O(n) copy-on-write
+    private final Object distanceLock = new Object();
+    private float totalDistance = 0;
+
+    private final AtomicLong totalLocations = new AtomicLong(0);
+
     private final List<JSONObject> trackHistory = Collections.synchronizedList(new LinkedList<>());
     private final Map<String, GeoFence> geofences = new ConcurrentHashMap<>();
-    private final List<String> triggeredGeofences = new CopyOnWriteArrayList<>();
+    
+    // Deque cho hiệu suất O(1) khi add/remove đầu danh sách
+    private final ConcurrentLinkedDeque<String> triggeredGeofences = new ConcurrentLinkedDeque<>();
 
-    private volatile boolean isSpoofingDetected = false;
-
-    private long totalLocations = 0;
-
-    // ThreadLocal for thread-safe date/number formatting (SimpleDateFormat & DecimalFormat are NOT thread-safe)
-    private static final ThreadLocal<SimpleDateFormat> sdf = ThreadLocal.withInitial(
-        () -> new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
-    );
+    // ThreadLocal formats (Safe & UTC timezone)
+    private static final ThreadLocal<SimpleDateFormat> sdf = ThreadLocal.withInitial(() -> {
+        SimpleDateFormat f = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US);
+        f.setTimeZone(TimeZone.getTimeZone("UTC"));
+        return f;
+    });
     private static final ThreadLocal<DecimalFormat> dfCoord = ThreadLocal.withInitial(
-        () -> new DecimalFormat("#.0000000")
+            () -> new DecimalFormat("#.0000000")
     );
 
     private static class GeoFence {
@@ -88,24 +94,28 @@ public class GpsModule {
         double lat;
         double lng;
         float radius;
-        boolean isInside = false;
+        volatile boolean isInside = false;
 
-        GeoFence(String id, String name, double lat, double lng, float radius) {
+        GeoFence(String id, String name, double lat, double lng, float radius, boolean isInside) {
             this.id = id;
             this.name = name;
             this.lat = lat;
             this.lng = lng;
-            // Enforce minimum radius so enter hysteresis (radius - 50m) always works
             this.radius = Math.max(radius, MIN_GEOFENCE_RADIUS);
+            this.isInside = isInside;
         }
     }
 
     public GpsModule(Context context) {
         this.ctx = context.getApplicationContext();
         this.prefs = ctx.getSharedPreferences(".gps_config", Context.MODE_PRIVATE);
+        this.locationManager = (LocationManager) ctx.getSystemService(Context.LOCATION_SERVICE);
+        this.fusedClient = LocationServices.getFusedLocationProviderClient(ctx);
 
-        locationManager = (LocationManager) ctx.getSystemService(Context.LOCATION_SERVICE);
-        fusedClient = LocationServices.getFusedLocationProviderClient(ctx);
+        if (locationManager == null) {
+            Log.e(TAG, "LocationManager is null. GPS features disabled.");
+            return;
+        }
 
         taoLocationCallbacks();
         taoGnssCallbacks();
@@ -128,13 +138,18 @@ public class GpsModule {
             public void onLocationChanged(Location location) {
                 xuLyLocation(location, "GPS");
             }
-            @Override
-            public void onStatusChanged(String provider, int status, Bundle extras) {}
-            @Override
-            public void onProviderEnabled(String provider) {}
+            @Override public void onStatusChanged(String provider, int status, Bundle extras) {}
+            @Override public void onProviderEnabled(String provider) {
+                // Khi GPS bật lại, chuyển từ Network sang GPS
+                if (LocationManager.GPS_PROVIDER.equals(provider)) {
+                    chuyenSangGps();
+                }
+            }
             @Override
             public void onProviderDisabled(String provider) {
-                chuyenSangNetworkFallback();
+                if (LocationManager.GPS_PROVIDER.equals(provider)) {
+                    chuyenSangNetworkFallback();
+                }
             }
         };
 
@@ -143,12 +158,9 @@ public class GpsModule {
             public void onLocationChanged(Location location) {
                 xuLyLocation(location, "NETWORK");
             }
-            @Override
-            public void onStatusChanged(String provider, int status, Bundle extras) {}
-            @Override
-            public void onProviderEnabled(String provider) {}
-            @Override
-            public void onProviderDisabled(String provider) {}
+            @Override public void onStatusChanged(String provider, int status, Bundle extras) {}
+            @Override public void onProviderEnabled(String provider) {}
+            @Override public void onProviderDisabled(String provider) {}
         };
     }
 
@@ -172,43 +184,66 @@ public class GpsModule {
     }
 
     private void xuLyLocation(Location location, String source) {
+        if (location == null) return;
         long now = System.currentTimeMillis();
 
         if (kiemTraSpoofing(location)) {
-            isSpoofingDetected = true;
-            // NOTE: On emulators all locations are "mock" — we flag it but still process
-            // so that GPS works on virtual devices (Android emulators, LDPlayer, etc.)
+            spoofingDetectedAt = now;
         }
 
-        // Skip stale locations older than 10 minutes.
-        // The original 2-minute limit was too aggressive: emulators and some real devices
-        // (e.g. cold GPS fix) can produce locations whose timestamp is behind wall-clock
-        // by several minutes before the first real fix arrives.
+        // Bỏ qua location quá cũ (10 phút)
         long locationAge = now - location.getTime();
         if (locationAge > 600000) return;
 
-        if (bestLocation != null) {
-            float distance = location.distanceTo(bestLocation);
+        // Chỉ cập nhật nếu location này tốt hơn location cũ
+        if (isBetterLocation(location, bestLocation)) {
+            if (bestLocation != null) {
+                float distance = location.distanceTo(bestLocation);
+                if (distance > 1) {
+                    currentBearing = bestLocation.bearingTo(location);
+                }
+                // Lọc nhiễu GPS: Chỉ cộng khoảng cách nếu dịch chuyển > 0.5m hoặc > 50% độ chính xác
+                float minDist = Math.max(0.5f, bestLocation.getAccuracy() * 0.5f);
+                if (distance > minDist) {
+                    synchronized (distanceLock) {
+                        totalDistance += distance;
+                    }
+                }
+            }
 
-            if (distance > 1) {
-                currentBearing = bestLocation.bearingTo(location);
-            }
-            if (distance > 0.5) {
-                totalDistance += distance;
-            }
+            bestLocation = location;
+            lastUpdateTime = now;
+            currentAltitude = location.getAltitude();
+            currentSpeed = location.hasSpeed() ? location.getSpeed() : 0;
         }
-
-        // Use the device's Doppler-based speed (much more accurate than manual distance/time)
-        currentSpeed = location.hasSpeed() ? location.getSpeed() : 0;
-
-        bestLocation = location;
-        lastUpdateTime = now;
-        currentAccuracy = location.getAccuracy();
-        currentAltitude = location.getAltitude();
 
         luuTrackHistory(location, source);
         kiemTraGeofence(location);
-        totalLocations++;
+        totalLocations.incrementAndGet();
+    }
+
+    /**
+     * Tiêu chí chọn location tốt hơn (dựa trên thời gian và độ chính xác)
+     */
+    private boolean isBetterLocation(Location location, Location currentBestLocation) {
+        if (currentBestLocation == null) return true;
+
+        long timeDelta = location.getTime() - currentBestLocation.getTime();
+        boolean isSignificantlyNewer = timeDelta > 10 * 1000;
+        boolean isSignificantlyOlder = timeDelta < -10 * 1000;
+        boolean isNewer = timeDelta > 0;
+
+        if (isSignificantlyNewer) return true;
+        if (isSignificantlyOlder) return false;
+
+        int accuracyDelta = (int) (location.getAccuracy() - currentBestLocation.getAccuracy());
+        boolean isLessAccurate = accuracyDelta > 0;
+        boolean isMoreAccurate = accuracyDelta < 0;
+        boolean isSignificantlyLessAccurate = accuracyDelta > 50;
+
+        if (isMoreAccurate) return true;
+        if (isNewer && !isLessAccurate) return true;
+        return isNewer && !isSignificantlyLessAccurate;
     }
 
     private void luuTrackHistory(Location location, String source) {
@@ -225,8 +260,6 @@ public class GpsModule {
             point.put("satellites", satelliteUsed);
             point.put("timestamp", sdf.get().format(new Date(location.getTime())));
 
-            // Trim + add in single synchronized block for atomicity.
-            // LinkedList.removeFirst() is O(1) vs CopyOnWriteArrayList.remove(0) which was O(n).
             synchronized (trackHistory) {
                 while (trackHistory.size() >= MAX_TRACK_HISTORY && !trackHistory.isEmpty()) {
                     trackHistory.remove(0);
@@ -242,14 +275,19 @@ public class GpsModule {
         } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR2) {
             if (location.isFromMockProvider()) return true;
         }
-        // Use the device-reported speed for spoofing check (Doppler-based, not affected by GPS jitter)
-        // Speed > 300 km/h (83.33 m/s) is suspicious
-        if (location.hasSpeed() && location.getSpeed() > 83.33f) return true;
+        if (location.hasSpeed() && location.getSpeed() > 83.33f) return true; // > 300 km/h
         return false;
     }
 
     private void kiemTraGeofence(Location location) {
         for (GeoFence gf : geofences.values()) {
+            // Pre-filter bằng Bounding Box để giảm tải tính toán (tránh gọi distanceBetween không cần thiết)
+            double latDiff = Math.abs(location.getLatitude() - gf.lat);
+            double lngDiff = Math.abs(location.getLongitude() - gf.lng);
+            // 1 độ vĩ độ ~ 111km. Threshold = (radius + 150m) / 111000m
+            double threshold = (gf.radius + 151) / 111000.0; 
+            if (latDiff > threshold || lngDiff > threshold) continue;
+
             float[] results = new float[1];
             Location.distanceBetween(location.getLatitude(), location.getLongitude(), gf.lat, gf.lng, results);
             float distance = results[0];
@@ -258,39 +296,47 @@ public class GpsModule {
                 gf.isInside = true;
                 String event = "GEOFENCE_ENTER:" + gf.name;
                 addTriggeredEvent(event);
+                luuGeofences(); // Lưu trạng thái isInside
                 Log.d(TAG, event);
             } else if (gf.isInside && distance > gf.radius + 150) {
                 gf.isInside = false;
                 String event = "GEOFENCE_EXIT:" + gf.name;
                 addTriggeredEvent(event);
+                luuGeofences(); // Lưu trạng thái isInside
                 Log.d(TAG, event);
             }
         }
     }
 
-    /** Add geofence event with bounded size to prevent unbounded memory growth. */
     private void addTriggeredEvent(String event) {
         while (triggeredGeofences.size() >= MAX_TRIGGERED_EVENTS) {
-            try {
-                triggeredGeofences.remove(0);
-            } catch (IndexOutOfBoundsException ignored) {
-                break;
-            }
+            triggeredGeofences.pollFirst(); // O(1) trên Deque
         }
-        triggeredGeofences.add(event);
+        triggeredGeofences.addLast(event);
     }
 
+    @SuppressLint("MissingPermission")
     private void chuyenSangNetworkFallback() {
         try {
-            if (locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
+            if (locationManager != null && locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
                 locationManager.requestLocationUpdates(LocationManager.NETWORK_PROVIDER, 5000, 10, networkListener);
             }
         } catch (SecurityException ignored) {}
     }
 
     @SuppressLint("MissingPermission")
+    private void chuyenSangGps() {
+        try {
+            if (locationManager != null && locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
+                locationManager.removeUpdates(networkListener);
+                locationManager.requestLocationUpdates(LocationManager.GPS_PROVIDER, GPS_INTERVAL_MEDIUM, MIN_DISTANCE, gpsListener);
+            }
+        } catch (SecurityException ignored) {}
+    }
+
+    @SuppressLint("MissingPermission")
     public void startTracking() {
-        if (isTracking) return;
+        if (isTracking || locationManager == null) return;
         isTracking = true;
 
         try {
@@ -300,14 +346,10 @@ public class GpsModule {
                 chuyenSangNetworkFallback();
             }
 
-            // setWaitForAccurateLocation(false): on emulators (LDPlayer, Genymotion, AVD)
-            // there is no real GPS hardware, so waiting for an "accurate" fix means the
-            // FusedLocationProviderClient callback may never fire. Setting this to false
-            // makes it deliver the best available location (network / mock) immediately.
             LocationRequest req = new LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, GPS_INTERVAL_MEDIUM)
-                .setMinUpdateIntervalMillis(2000)
-                .setWaitForAccurateLocation(false)
-                .build();
+                    .setMinUpdateIntervalMillis(2000)
+                    .setWaitForAccurateLocation(false)
+                    .build();
             fusedClient.requestLocationUpdates(req, fusedCallback, Looper.getMainLooper());
         } catch (SecurityException ignored) {}
     }
@@ -317,14 +359,16 @@ public class GpsModule {
         isTracking = false;
 
         try {
-            locationManager.removeUpdates(gpsListener);
-            locationManager.removeUpdates(networkListener);
+            if (locationManager != null) {
+                locationManager.removeUpdates(gpsListener);
+                locationManager.removeUpdates(networkListener);
+            }
             fusedClient.removeLocationUpdates(fusedCallback);
         } catch (Exception ignored) {}
     }
 
     public void themGeofence(String id, String name, double lat, double lng, float radius) {
-        geofences.put(id, new GeoFence(id, name, lat, lng, radius));
+        geofences.put(id, new GeoFence(id, name, lat, lng, radius, false));
         luuGeofences();
     }
 
@@ -343,6 +387,7 @@ public class GpsModule {
                 obj.put("lat", gf.lat);
                 obj.put("lng", gf.lng);
                 obj.put("radius", gf.radius);
+                obj.put("isInside", gf.isInside); // Lưu trạng thái để khôi phục
                 arr.put(obj);
             }
             prefs.edit().putString("geofences", arr.toString()).apply();
@@ -356,12 +401,12 @@ public class GpsModule {
             JSONArray arr = new JSONArray(saved);
             for (int i = 0; i < arr.length(); i++) {
                 JSONObject gf = arr.getJSONObject(i);
-                // Put directly to avoid triggering luuGeofences() save loop
                 String id = gf.getString("id");
                 geofences.put(id, new GeoFence(
-                    id, gf.getString("name"),
-                    gf.getDouble("lat"), gf.getDouble("lng"),
-                    (float) gf.getDouble("radius")
+                        id, gf.getString("name"),
+                        gf.getDouble("lat"), gf.getDouble("lng"),
+                        (float) gf.getDouble("radius"),
+                        gf.optBoolean("isInside", false)
                 ));
             }
         } catch (Exception ignored) {}
@@ -370,18 +415,21 @@ public class GpsModule {
     public JSONObject getData() {
         JSONObject data = new JSONObject();
         try {
-            if (bestLocation != null) {
+            Location loc = bestLocation; // Snapshot tránh NPE
+            if (loc != null) {
                 data.put(Protocol.KEY_ENABLED, true);
-                data.put(Protocol.KEY_LATITUDE, bestLocation.getLatitude());
-                data.put(Protocol.KEY_LONGITUDE, bestLocation.getLongitude());
-                data.put(Protocol.KEY_ACCURACY, bestLocation.getAccuracy());
-                data.put(Protocol.KEY_SPEED, bestLocation.getSpeed());
-                data.put(Protocol.KEY_PROVIDER, bestLocation.getProvider());
-                data.put(Protocol.KEY_TIMESTAMP, sdf.get().format(new Date(bestLocation.getTime())));
-                data.put("altitude", bestLocation.getAltitude());
+                data.put(Protocol.KEY_LATITUDE, loc.getLatitude());
+                data.put(Protocol.KEY_LONGITUDE, loc.getLongitude());
+                data.put(Protocol.KEY_ACCURACY, loc.getAccuracy());
+                data.put(Protocol.KEY_SPEED, currentSpeed);
+                data.put(Protocol.KEY_PROVIDER, loc.getProvider());
+                data.put(Protocol.KEY_TIMESTAMP, sdf.get().format(new Date(loc.getTime())));
+                data.put("altitude", currentAltitude);
                 data.put("bearing", currentBearing);
                 data.put("satellites", satelliteUsed);
-                data.put("totalDistance", totalDistance);
+                synchronized (distanceLock) {
+                    data.put("totalDistance", totalDistance);
+                }
             } else {
                 data.put(Protocol.KEY_ENABLED, false);
                 data.put(Protocol.KEY_ERROR, "No location");
@@ -401,8 +449,12 @@ public class GpsModule {
             }
             result.put("points", arr);
             result.put("count", trackHistory.size());
-            result.put("totalDistance", totalDistance);
-            result.put("spoofingDetected", isSpoofingDetected);
+            synchronized (distanceLock) {
+                result.put("totalDistance", totalDistance);
+            }
+            
+            boolean currentlySpoofing = (System.currentTimeMillis() - spoofingDetectedAt) < SPOOFING_RESET_TIME_MS;
+            result.put("spoofingDetected", currentlySpoofing);
         } catch (Exception ignored) {}
         return result;
     }
@@ -422,7 +474,7 @@ public class GpsModule {
                 arr.put(obj);
             }
             result.put("geofences", arr);
-            result.put("triggeredEvents", triggeredGeofences);
+            result.put("triggeredEvents", new JSONArray(triggeredGeofences));
         } catch (Exception ignored) {}
         return result;
     }
@@ -430,7 +482,7 @@ public class GpsModule {
     public JSONObject getAdvancedData() {
         JSONObject data = getData();
         try {
-            data.put("totalLocations", totalLocations);
+            data.put("totalLocations", totalLocations.get());
             data.put("satelliteCount", satelliteCount);
             data.put("satelliteUsed", satelliteUsed);
             data.put("trackHistoryCount", trackHistory.size());
@@ -440,9 +492,26 @@ public class GpsModule {
         return data;
     }
 
+    // --- Extensibility Helpers ---
+    public void clearTrackHistory() {
+        synchronized (trackHistory) {
+            trackHistory.clear();
+        }
+    }
+
+    public void resetTotalDistance() {
+        synchronized (distanceLock) {
+            totalDistance = 0f;
+        }
+    }
+
+    public void clearTriggeredEvents() {
+        triggeredGeofences.clear();
+    }
+
     public void destroy() {
         stopTracking();
-        if (gnssStatusCallback != null) {
+        if (gnssStatusCallback != null && locationManager != null) {
             try {
                 locationManager.unregisterGnssStatusCallback(gnssStatusCallback);
             } catch (Exception ignored) {}

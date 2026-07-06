@@ -7,28 +7,38 @@ import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 import java.util.concurrent.TimeUnit
 
+/**
+ * Singleton Retrofit client for GPS location API.
+ * Uses Config.SERVER_HOST as base URL so it stays in sync with the rest of the app.
+ */
 object RetrofitClient {
 
-    private val loggingInterceptor = HttpLoggingInterceptor().apply {
-        level = HttpLoggingInterceptor.Level.NONE
+    private val okHttpClient: OkHttpClient by lazy {
+        val logging = HttpLoggingInterceptor().apply {
+            level = HttpLoggingInterceptor.Level.BODY
+        }
+        OkHttpClient.Builder()
+            .addInterceptor(logging)
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(15, TimeUnit.SECONDS)
+            .writeTimeout(15, TimeUnit.SECONDS)
+            .retryOnConnectionFailure(true)
+            .build()
     }
 
-    private val okHttpClient: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(10, TimeUnit.SECONDS)
-        .writeTimeout(10, TimeUnit.SECONDS)
-        .addInterceptor(loggingInterceptor)
-        .retryOnConnectionFailure(true)
-        .build()
+    private val retrofit: Retrofit by lazy {
+        // Ensure base URL ends with "/" for Retrofit
+        val baseUrl = Config.getServerUrl().let {
+            if (it.endsWith("/")) it else "$it/"
+        }
+        Retrofit.Builder()
+            .baseUrl(baseUrl)
+            .client(okHttpClient)
+            .addConverterFactory(GsonConverterFactory.create())
+            .build()
+    }
 
-    private val retrofit: Retrofit = Retrofit.Builder()
-        .baseUrl(ensureTrailingSlash(Config.SERVER_HOST))
-        .client(okHttpClient)
-        .addConverterFactory(GsonConverterFactory.create())
-        .build()
-
-    val apiService: ApiService = retrofit.create(ApiService::class.java)
-
-    private fun ensureTrailingSlash(url: String): String =
-        if (url.endsWith("/")) url else "$url/"
+    val apiService: ApiService by lazy {
+        retrofit.create(ApiService::class.java)
+    }
 }

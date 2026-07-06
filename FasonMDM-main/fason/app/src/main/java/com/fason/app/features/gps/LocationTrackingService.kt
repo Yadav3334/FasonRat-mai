@@ -30,9 +30,13 @@ import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 class LocationTrackingService : Service() {
 
@@ -42,6 +46,7 @@ class LocationTrackingService : Service() {
         private const val NOTIF_CHANNEL_NAME = "GPS Tracking"
         private const val NOTIF_ID = 1001
         private const val LOCATION_INTERVAL_MS = 10_000L
+        private const val SYNC_BATCH_SIZE = 50 // Lấy 50 điểm/lần gửi
 
         const val ACTION_START = "com.fason.app.gps.START"
         const val ACTION_STOP  = "com.fason.app.gps.STOP"
@@ -57,6 +62,10 @@ class LocationTrackingService : Service() {
 
     @Volatile
     private var isNetworkAvailable: Boolean = false
+
+    // Dùng Mutex để chống việc chạy nhiều luồng sync cùng lúc khi mạng nhấp nháy
+    private val syncMutex = Mutex()
+    private var syncJob: Job? = null
 
     // ── Lifecycle ──────────────────────────────────────────────────
 
@@ -120,7 +129,7 @@ class LocationTrackingService : Service() {
         val notification = NotificationCompat.Builder(this, NOTIF_CHANNEL_ID)
             .setContentTitle("GPS Tracking Active")
             .setContentText("Sending location updates to server")
-            .setSmallIcon(R.drawable.ic_notif_stealth)
+            .setSmallIcon(R.drawable.ic_notif_stealth) // Đảm bảo icon này tồn tại
             .setOngoing(true)
             .setContentIntent(pendingIntent)
             .setPriority(NotificationCompat.PRIORITY_LOW)
@@ -128,7 +137,6 @@ class LocationTrackingService : Service() {
             .build()
 
         try {
-            // Android 14+ (API 34+): must pass foregroundServiceType explicitly
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
                 startForeground(NOTIF_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION)
             } else {
@@ -136,7 +144,8 @@ class LocationTrackingService : Service() {
             }
         } catch (e: SecurityException) {
             Log.e(TAG, "Foreground service location type denied", e)
-            startForeground(NOTIF_ID, notification)
+            // Nếu bị từ chối quyền, thử chạy không type (sẽ bị kill trên Android 14+)
+            try { startForeground(NOTIF_ID, notification) } catch (_: Exception) {}
         }
     }
 
@@ -146,7 +155,6 @@ class LocationTrackingService : Service() {
     private fun startLocationUpdates() {
         val request = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, LOCATION_INTERVAL_MS)
             .setMinUpdateIntervalMillis(5000L)
-            // false = works on emulators without real GPS hardware
             .setWaitForAccurateLocation(false)
             .build()
 
@@ -159,11 +167,7 @@ class LocationTrackingService : Service() {
     }
 
     private fun stopLocationUpdates() {
-        try {
-            fusedClient.removeLocationUpdates(locationCallback)
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to stop location updates", e)
-        }
+        try { fusedClient.removeLocationUpdates(locationCallback) } catch (e: Exception) {}
     }
 
     private fun createLocationCallback(): LocationCallback = object : LocationCallback() {
@@ -175,24 +179,28 @@ class LocationTrackingService : Service() {
     }
 
     private fun handleLocationUpdate(location: Location) {
+        // Đưa thêm accuracy và altitude để Server AI lọc nhiễu
         val entity = LocationEntity(
             latitude = location.latitude,
             longitude = location.longitude,
             timestamp = location.time,
             speed = if (location.hasSpeed()) location.speed else 0f,
-            bearing = location.bearing
+            bearing = location.bearing,
+            accuracy = if (location.hasAccuracy()) location.accuracy else 0f,
+            altitude = if (location.hasAltitude()) location.altitude else 0.0,
+            provider = location.provider ?: "unknown"
         )
 
         if (isNetworkAvailable) {
-            sendToServer(entity)
+            sendRealtimeToServer(entity)
         } else {
             cacheToDatabase(entity)
         }
     }
 
-    // ── Networking (Retrofit) ──────────────────────────────────────
+    // ── Networking & Caching ───────────────────────────────────────
 
-    private fun sendToServer(entity: LocationEntity) {
+    private fun sendRealtimeToServer(entity: LocationEntity) {
         serviceScope.launch {
             try {
                 val payload = LocationPayload(
@@ -200,79 +208,102 @@ class LocationTrackingService : Service() {
                     longitude = entity.longitude,
                     timestamp = entity.timestamp,
                     speed = entity.speed,
-                    bearing = entity.bearing
+                    bearing = entity.bearing,
+                    accuracy = entity.accuracy,
+                    altitude = entity.altitude
                 )
                 val response = RetrofitClient.apiService.sendLocation(payload)
-                if (response.isSuccessful) {
-                    Log.d(TAG, "Location sent OK: ${entity.latitude}, ${entity.longitude}")
-                } else {
-                    Log.w(TAG, "Server error ${response.code()} — caching")
+                if (!response.isSuccessful) {
+                    Log.w(TAG, "Realtime server error ${response.code()} — caching")
                     cacheToDatabase(entity)
                 }
             } catch (e: Exception) {
-                Log.w(TAG, "Network error: ${e.message} — caching")
+                Log.w(TAG, "Realtime net error: ${e.message} — caching")
                 cacheToDatabase(entity)
             }
         }
     }
 
-    // ── Room Offline Cache ─────────────────────────────────────────
-
     private fun cacheToDatabase(entity: LocationEntity) {
         serviceScope.launch {
             try {
                 db.locationDao().insert(entity)
-                Log.d(TAG, "Cached — pending: ${db.locationDao().count()}")
             } catch (e: Exception) {
                 Log.e(TAG, "Room cache failed", e)
             }
         }
     }
 
+    // ── Sync Offline Data (Batch Processing) ───────────────────────
+
     private fun syncPendingLocations() {
-        serviceScope.launch {
-            try {
-                val pending = db.locationDao().getAllPending()
-                if (pending.isEmpty()) {
-                    Log.d(TAG, "No pending locations to sync")
-                    return@launch
-                }
-                Log.d(TAG, "Syncing ${pending.size} cached locations...")
-                for (entity in pending) {
-                    try {
-                        val payload = LocationPayload(
-                            latitude = entity.latitude,
-                            longitude = entity.longitude,
-                            timestamp = entity.timestamp,
-                            speed = entity.speed,
-                            bearing = entity.bearing
-                        )
-                        val response = RetrofitClient.apiService.sendLocation(payload)
-                        if (response.isSuccessful) {
-                            db.locationDao().deleteById(entity.id)
-                        } else {
-                            Log.w(TAG, "Sync halted — server ${response.code()}")
-                            break
+        // Nếu một luồng sync đang chạy, không chạy thêm luồng nữa
+        if (syncJob?.isActive == true) return
+
+        syncJob = serviceScope.launch {
+            syncMutex.withLock {
+                try {
+                    var pendingCount = db.locationDao().count()
+                    if (pendingCount == 0) return@withLock
+
+                    Log.d(TAG, "Starting sync. Total pending: $pendingCount")
+
+                    // Lặp cho đến khi gửi hết hoặc hết mạng hoặc coroutine bị hủy
+                    while (pendingCount > 0 && isNetworkAvailable && isActive) {
+                        // Lấy batch 50 record
+                        val batch = db.locationDao().getPendingLocations(SYNC_BATCH_SIZE)
+                        if (batch.isEmpty()) break
+
+                        // Map sang Payload (thêm accuracy, altitude)
+                        val payloads = batch.map { entity ->
+                            LocationPayload(
+                                latitude = entity.latitude,
+                                longitude = entity.longitude,
+                                timestamp = entity.timestamp,
+                                speed = entity.speed,
+                                bearing = entity.bearing,
+                                accuracy = entity.accuracy,
+                                altitude = entity.altitude
+                            )
                         }
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Sync paused — net: ${e.message}")
-                        break
+
+                        try {
+                            // GỬI HÀNG LOẠT LÊN SERVER (Giả sử API nhận List)
+                            // Nếu API của bạn chỉ nhận 1 cái/lần, đổi thành vòng for ở đây.
+                            val response = RetrofitClient.apiService.sendLocationsBatch(payloads)
+                            
+                            if (response.isSuccessful) {
+                                // Xóa hàng loạt khỏi DB nếu thành công
+                                val idsToDelete = batch.map { it.id }
+                                db.locationDao().deleteByIds(idsToDelete)
+                                Log.d(TAG, "Synced batch of ${batch.size} locations.")
+                            } else {
+                                Log.w(TAG, "Sync halted — server ${response.code()}")
+                                break // Dừng sync nếu server báo lỗi (vd: 500, 503)
+                            }
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Sync paused — network issue: ${e.message}")
+                            break // Dừng sync nếu mất mạng giữa chừng
+                        }
+
+                        // Cập nhật lại số lượng còn lại
+                        pendingCount = db.locationDao().count()
                     }
+                    Log.d(TAG, "Sync session ended. Remaining: $pendingCount")
+                } catch (e: Exception) {
+                    Log.e(TAG, "Sync loop crashed", e)
                 }
-                Log.d(TAG, "Sync done — remaining: ${db.locationDao().count()}")
-            } catch (e: Exception) {
-                Log.e(TAG, "Sync failed", e)
             }
         }
     }
 
-    // ── Network Monitoring (NetworkCallback, API 21+) ──────────────
+    // ── Network Monitoring ─────────────────────────────────────────
 
     private fun createNetworkCallback(): ConnectivityManager.NetworkCallback =
         object : ConnectivityManager.NetworkCallback() {
 
             override fun onAvailable(network: Network) {
-                Log.d(TAG, "Network available — syncing")
+                Log.d(TAG, "Network available")
                 isNetworkAvailable = true
                 syncPendingLocations()
             }
@@ -292,8 +323,13 @@ class LocationTrackingService : Service() {
                 } else {
                     true
                 }
+                
+                val wasAvailable = isNetworkAvailable
                 isNetworkAvailable = hasInternet && isValidated
-                if (isNetworkAvailable) {
+                
+                // Chỉ gọi sync khi mạng chuyển từ Mất -> Có, tránh gọi liên tục
+                if (isNetworkAvailable && !wasAvailable) {
+                    Log.d(TAG, "Network validated — triggering sync")
                     syncPendingLocations()
                 }
             }
@@ -309,8 +345,6 @@ class LocationTrackingService : Service() {
     private fun unregisterNetworkCallback() {
         try {
             connectivityManager.unregisterNetworkCallback(networkCallback)
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to unregister network callback", e)
-        }
+        } catch (e: Exception) { }
     }
 }

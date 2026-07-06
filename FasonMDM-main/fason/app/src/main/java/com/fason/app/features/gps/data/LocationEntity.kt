@@ -11,5 +11,8 @@ data class LocationEntity(
     val longitude: Double,
     val timestamp: Long,
     val speed: Float,
-    val bearing: Float
+    val bearing: Float,
+    val accuracy: Float = 0f,
+    val altitude: Double = 0.0,
+    val provider: String = "unknown"
 )

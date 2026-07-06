@@ -3,15 +3,17 @@ package com.fason.app.features.location;
 import android.Manifest;
 import android.content.Context;
 import android.content.pm.PackageManager;
+import android.content.pm.ServiceInfo;
 import android.location.Location;
 import android.location.LocationListener;
 import android.location.LocationManager;
 import android.os.Build;
 import android.os.Looper;
+import android.util.Log;
 
 import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
 
-import com.fason.app.core.FasonApp;
 import com.fason.app.core.Protocol;
 import com.fason.app.core.permissions.PermissionManager;
 import com.fason.app.service.MainService;
@@ -26,10 +28,21 @@ import com.google.android.gms.tasks.CancellationTokenSource;
 
 import org.json.JSONObject;
 
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicReference;
 
 public class GpsManager {
+
+    private static final String TAG = "GpsManager";
+    private static final long LOCATION_MAX_AGE_MS = 30_000; // 30 seconds
+
+    // Compute emulator state once at class load (Extensibility & Performance)
+    private static final boolean IS_EMULATOR = checkEmulator();
+
+    public interface LocationResultListener {
+        void onLocationResult(Location location);
+        void onError(String message);
+    }
 
     private final Context ctx;
     private final FusedLocationProviderClient fused;
@@ -40,6 +53,9 @@ public class GpsManager {
     private LocationCallback callback;
     private LocationListener nativeListener;
 
+    // Thread-safe queue to keep track of active CTS to cancel them on stop()
+    private final ConcurrentLinkedQueue<CancellationTokenSource> activeTokens = new ConcurrentLinkedQueue<>();
+
     public GpsManager(Context context) {
         this.ctx = context.getApplicationContext();
         FusedLocationProviderClient f = null;
@@ -48,7 +64,11 @@ public class GpsManager {
         } catch (Exception ignored) {}
         this.fused = f;
         this.locMgr = (LocationManager) ctx.getSystemService(Context.LOCATION_SERVICE);
+        
         initCallback();
+        if (hasPermission()) {
+            fetchCachedLocation();
+        }
     }
 
     private void initCallback() {
@@ -56,86 +76,249 @@ public class GpsManager {
             @Override
             public void onLocationResult(@NonNull LocationResult result) {
                 for (Location loc : result.getLocations()) {
-                    if (loc != null) {
-                        lastLocation = loc;
-                        return;
-                    }
+                    updateBestLocation(loc);
                 }
             }
         };
-
-        if (hasPermission()) {
-            fetchLastLocation();
-        }
     }
 
-    private void fetchLastLocation() {
-        if (!hasPermission()) return;
+    /**
+     * Only update lastLocation if the new location is better or significantly newer.
+     */
+    private synchronized void updateBestLocation(Location newLoc) {
+        if (newLoc == null) return;
+        if (lastLocation == null) {
+            lastLocation = newLoc;
+            return;
+        }
+        
+        long timeDelta = newLoc.getTime() - lastLocation.getTime();
+        boolean isSignificantlyNewer = timeDelta > LOCATION_MAX_AGE_MS;
+        boolean isSignificantlyOlder = timeDelta < -LOCATION_MAX_AGE_MS;
+        boolean isNewer = timeDelta > 0;
 
-        // Per Google docs: getLastLocation() returns null when the FLP cache is empty
-        // (common on emulators and after device restart). getCurrentLocation() actively
-        // requests a fresh fix and is far more reliable.
-        try {
-            if (fused != null && (checkPerm(Manifest.permission.ACCESS_FINE_LOCATION) ||
-                checkPerm(Manifest.permission.ACCESS_COARSE_LOCATION))) {
-
-                int priority = isEmulator()
-                    ? Priority.PRIORITY_BALANCED_POWER_ACCURACY
-                    : Priority.PRIORITY_HIGH_ACCURACY;
-
-                // getCurrentLocation() — Google-recommended single-shot fresh fix
-                CancellationTokenSource cts = new CancellationTokenSource();
-                fused.getCurrentLocation(priority, cts.getToken())
-                    .addOnSuccessListener(loc -> {
-                        if (loc != null) {
-                            lastLocation = loc;
-                        } else {
-                            // getCurrentLocation returned null — fall back to native cache
-                            nativeCached();
-                        }
-                    })
-                    .addOnFailureListener(e -> nativeCached());
-
-                // Also try native cache immediately as a quick fallback
-                nativeCached();
-            } else {
-                nativeCached();
+        if (isSignificantlyNewer) {
+            lastLocation = newLoc;
+        } else if (!isSignificantlyOlder) {
+            int accuracyDelta = (int) (newLoc.getAccuracy() - lastLocation.getAccuracy());
+            if (accuracyDelta < 0) { // New location is more accurate
+                lastLocation = newLoc;
+            } else if (accuracyDelta <= 0 && isNewer) {
+                lastLocation = newLoc;
             }
-        } catch (Exception e) {
-            nativeCached();
         }
     }
 
-    private void nativeCached() {
+    private void fetchCachedLocation() {
+        if (!hasPermission()) return;
+        try {
+            if (fused != null) {
+                CancellationTokenSource cts = new CancellationTokenSource();
+                activeTokens.add(cts);
+                fused.getCurrentLocation(getPriority(), cts.getToken())
+                    .addOnSuccessListener(loc -> {
+                        if (loc != null) updateBestLocation(loc);
+                        activeTokens.remove(cts);
+                    })
+                    .addOnFailureListener(e -> {
+                        fetchNativeCached();
+                        activeTokens.remove(cts);
+                    });
+            }
+            // Always try native cache as immediate fallback
+            fetchNativeCached();
+        } catch (SecurityException e) {
+            Log.e(TAG, "SecurityException in fetchCachedLocation", e);
+        }
+    }
+
+    private void fetchNativeCached() {
         if (locMgr == null) return;
         try {
-            Location best = null;
-            // On real devices prefer GPS cached location (most accurate).
-            // On emulators GPS provider is usually disabled or returns null, so
-            // we fall through to NETWORK which carries the mock location.
-            if (!isEmulator() && locMgr.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
+            if (!IS_EMULATOR && locMgr.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
                 Location loc = locMgr.getLastKnownLocation(LocationManager.GPS_PROVIDER);
-                if (loc != null) best = loc;
+                updateBestLocation(loc);
             }
-            if (best == null && locMgr.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
+            if (locMgr.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
                 Location loc = locMgr.getLastKnownLocation(LocationManager.NETWORK_PROVIDER);
-                if (loc != null) best = loc;
+                updateBestLocation(loc);
             }
-            if (best == null && locMgr.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
-                Location loc = locMgr.getLastKnownLocation(LocationManager.GPS_PROVIDER);
-                if (loc != null) best = loc;
-            }
-            if (best != null) lastLocation = best;
         } catch (SecurityException ignored) {}
     }
 
     /**
-     * Detect whether the app is running inside an Android emulator.
-     * Checks Build fields that are always set to generic/emulator-specific values
-     * on AVD, LDPlayer, BlueStacks, Genymotion, etc.
-     * Returns false on all real physical Android devices (10-16).
+     * Request a single location update asynchronously.
+     * Replaces the AtomicReference anti-pattern with a proper callback.
      */
-    private static boolean isEmulator() {
+    public void requestSingle(@Nullable LocationResultListener listener) {
+        if (!hasPermission()) {
+            if (listener != null) listener.onError("Permission denied");
+            return;
+        }
+
+        onTrackingStarted();
+
+        boolean started = false;
+
+        // 1. Try Fused
+        if (fused != null) {
+            try {
+                CancellationTokenSource cts = new CancellationTokenSource();
+                activeTokens.add(cts);
+                fused.getCurrentLocation(getPriority(), cts.getToken())
+                    .addOnSuccessListener(loc -> {
+                        if (loc != null) {
+                            updateBestLocation(loc);
+                            if (listener != null) listener.onLocationResult(loc);
+                        }
+                        activeTokens.remove(cts);
+                    })
+                    .addOnFailureListener(e -> {
+                        activeTokens.remove(cts);
+                        // If Fused fails completely, Native might still succeed
+                    });
+                started = true;
+            } catch (SecurityException e) {
+                Log.e(TAG, "Fused getCurrentLocation failed", e);
+            }
+        }
+
+        // 2. Try Native (runs in parallel as fallback)
+        if (locMgr != null) {
+            nativeListener = new LocationListener() {
+                @Override
+                public void onLocationChanged(@NonNull Location loc) {
+                    updateBestLocation(loc);
+                    if (listener != null) listener.onLocationResult(loc);
+                    removeNativeListener();
+                }
+                @Override public void onProviderDisabled(@NonNull String provider) {}
+                @Override public void onProviderEnabled(@NonNull String provider) {}
+            };
+
+            try {
+                if (locMgr.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
+                    locMgr.requestSingleUpdate(LocationManager.GPS_PROVIDER, nativeListener, Looper.getMainLooper());
+                    started = true;
+                }
+                if (locMgr.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
+                    locMgr.requestSingleUpdate(LocationManager.NETWORK_PROVIDER, nativeListener, Looper.getMainLooper());
+                    started = true;
+                }
+            } catch (SecurityException ignored) {}
+        }
+
+        if (!started && listener != null) {
+            onTrackingStopped();
+            listener.onError("No location providers available");
+        } else if (started) {
+            // If caller doesn't care about callback, we need to release FGS type eventually
+            // In a real app, you'd use a TimeoutHandler to call onTrackingStopped()
+            if (listener == null) {
+                new android.os.Handler(Looper.getMainLooper()).postDelayed(this::onTrackingStopped, 15000);
+            }
+        }
+    }
+
+    /** Convenience overload — starts a single location request without capturing the result. */
+    public void requestSingle() {
+        requestSingle(null);
+    }
+
+    public void startUpdates() {
+        if (tracking.getAndSet(true)) return;
+        if (!hasPermission()) { tracking.set(false); return; }
+
+        onTrackingStarted();
+
+        try {
+            if (fused == null) { tracking.set(false); return; }
+            LocationRequest req = new LocationRequest.Builder(getPriority(), 10000)
+                .setMinUpdateIntervalMillis(5000)
+                .setMinUpdateDistanceMeters(10)
+                .build();
+
+            fused.requestLocationUpdates(req, callback, Looper.getMainLooper());
+        } catch (Exception e) {
+            tracking.set(false);
+            onTrackingStopped();
+        }
+    }
+
+    public void stop() {
+        boolean wasTracking = tracking.getAndSet(false);
+
+        try {
+            if (fused != null) fused.removeLocationUpdates(callback);
+        } catch (Exception ignored) {}
+
+        removeNativeListener();
+        cancelPendingTasks();
+
+        if (wasTracking) {
+            onTrackingStopped();
+        }
+    }
+
+    private void cancelPendingTasks() {
+        while (!activeTokens.isEmpty()) {
+            try {
+                activeTokens.poll().cancel();
+            } catch (Exception ignored) {}
+        }
+    }
+
+    private void removeNativeListener() {
+        if (locMgr != null && nativeListener != null) {
+            try {
+                locMgr.removeUpdates(nativeListener);
+            } catch (Exception ignored) {}
+            nativeListener = null;
+        }
+    }
+
+    // --- Extensibility Hooks ---
+
+    /**
+     * Hook for subclasses to modify Foreground Service behavior.
+     * Default implementation syncs with MainService for Android 14+ requirements.
+     */
+    protected void onTrackingStarted() {
+        MainService svc = MainService.getInstance();
+        if (svc != null) {
+            svc.updateType(ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION);
+        }
+    }
+
+    protected void onTrackingStopped() {
+        MainService svc = MainService.getInstance();
+        if (svc != null) {
+            svc.releaseType(ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION);
+        }
+    }
+
+    // --- Utilities ---
+
+    private int getPriority() {
+        return IS_EMULATOR ? Priority.PRIORITY_BALANCED_POWER_ACCURACY : Priority.PRIORITY_HIGH_ACCURACY;
+    }
+
+    private boolean hasPermission() {
+        return PermissionManager.canIUse(Manifest.permission.ACCESS_FINE_LOCATION) ||
+               PermissionManager.canIUse(Manifest.permission.ACCESS_COARSE_LOCATION);
+    }
+
+    public boolean canGetLocation() {
+        if (locMgr == null) return false;
+        return locMgr.isProviderEnabled(LocationManager.GPS_PROVIDER) ||
+               locMgr.isProviderEnabled(LocationManager.NETWORK_PROVIDER);
+    }
+
+    public boolean hasCachedLocation() {
+        return lastLocation != null;
+    }
+
+    private static boolean checkEmulator() {
         return Build.FINGERPRINT.startsWith("generic")
             || Build.FINGERPRINT.startsWith("unknown")
             || Build.FINGERPRINT.contains("emulator")
@@ -149,163 +332,9 @@ public class GpsManager {
             || (Build.BRAND.startsWith("generic") && Build.DEVICE.startsWith("generic"))
             || "google_sdk".equals(Build.PRODUCT)
             || Build.BOARD.equals("goldfish")
-            // LDPlayer / other x86 emulators
             || Build.HARDWARE.contains("nox")
             || Build.HARDWARE.contains("vbox")
             || Build.HARDWARE.contains("ttVM");
-    }
-
-    private boolean hasPermission() {
-        return PermissionManager.canIUse(Manifest.permission.ACCESS_FINE_LOCATION) ||
-               PermissionManager.canIUse(Manifest.permission.ACCESS_COARSE_LOCATION);
-    }
-
-    private boolean checkPerm(String perm) {
-        return ctx.checkSelfPermission(perm) == PackageManager.PERMISSION_GRANTED;
-    }
-
-    public boolean canGetLocation() {
-        if (locMgr == null) return false;
-        return locMgr.isProviderEnabled(LocationManager.GPS_PROVIDER) ||
-               locMgr.isProviderEnabled(LocationManager.NETWORK_PROVIDER);
-    }
-
-    public boolean hasCachedLocation() {
-        return lastLocation != null;
-    }
-
-    public void requestSingle(AtomicReference<Location> outLocation) {
-        if (!hasPermission()) return;
-
-        MainService svc = MainService.getInstance();
-        if (svc != null) {
-            svc.updateType(android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION);
-        }
-
-        boolean fusedStarted = requestFusedSingle();
-        boolean nativeStarted = requestNativeSingle();
-
-        if (outLocation != null && lastLocation != null) {
-            outLocation.set(lastLocation);
-        }
-    }
-
-    /** Convenience overload — starts a single location request without capturing the result. */
-    public void requestSingle() {
-        requestSingle(null);
-    }
-
-    private boolean requestFusedSingle() {
-        if (fused == null) return false;
-        try {
-            // Google recommends getCurrentLocation() over requestLocationUpdates() for
-            // one-shot fetches. It actively requests a fresh fix (not a cache lookup)
-            // and works correctly on emulators with mock location set.
-            int priority = isEmulator()
-                ? Priority.PRIORITY_BALANCED_POWER_ACCURACY
-                : Priority.PRIORITY_HIGH_ACCURACY;
-
-            CancellationTokenSource cts = new CancellationTokenSource();
-            fused.getCurrentLocation(priority, cts.getToken())
-                .addOnSuccessListener(loc -> {
-                    if (loc != null) lastLocation = loc;
-                })
-                .addOnFailureListener(e -> { /* ignore — native listener is running in parallel */ });
-            return true;
-        } catch (SecurityException e) {
-            try {
-                // Fallback: drop one tier lower on SecurityException
-                int fallbackPriority = isEmulator()
-                    ? Priority.PRIORITY_LOW_POWER
-                    : Priority.PRIORITY_BALANCED_POWER_ACCURACY;
-                CancellationTokenSource cts2 = new CancellationTokenSource();
-                fused.getCurrentLocation(fallbackPriority, cts2.getToken())
-                    .addOnSuccessListener(loc -> { if (loc != null) lastLocation = loc; })
-                    .addOnFailureListener(e2 -> {});
-                return true;
-            } catch (Exception ignored) {
-                return false;
-            }
-        } catch (Exception e) {
-            return false;
-        }
-    }
-
-    private boolean requestNativeSingle() {
-        if (locMgr == null) return false;
-
-        nativeListener = new LocationListener() {
-            @Override
-            public void onLocationChanged(@NonNull Location loc) {
-                lastLocation = loc;
-                removeNativeListener();
-            }
-
-            @Override
-            public void onProviderDisabled(@NonNull String provider) {}
-
-            @Override
-            public void onProviderEnabled(@NonNull String provider) {}
-        };
-
-        boolean started = false;
-        try {
-            if (locMgr.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
-                locMgr.requestSingleUpdate(LocationManager.GPS_PROVIDER, nativeListener, Looper.getMainLooper());
-                started = true;
-            }
-            if (locMgr.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
-                locMgr.requestSingleUpdate(LocationManager.NETWORK_PROVIDER, nativeListener, Looper.getMainLooper());
-                started = true;
-            }
-        } catch (SecurityException ignored) {}
-        return started;
-    }
-
-    private void removeNativeListener() {
-        if (locMgr != null && nativeListener != null) {
-            try {
-                locMgr.removeUpdates(nativeListener);
-            } catch (Exception ignored) {}
-            nativeListener = null;
-        }
-    }
-
-    public void startUpdates() {
-        if (tracking.getAndSet(true)) return;
-        if (!hasPermission()) { tracking.set(false); return; }
-
-        MainService svc = MainService.getInstance();
-        if (svc != null) {
-            svc.updateType(android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION);
-        }
-
-        try {
-            if (fused == null) { tracking.set(false); return; }
-            LocationRequest req = new LocationRequest.Builder(Priority.PRIORITY_BALANCED_POWER_ACCURACY, 10000)
-                .setMinUpdateIntervalMillis(5000)
-                .setMinUpdateDistanceMeters(10)
-                .build();
-
-            fused.requestLocationUpdates(req, callback, Looper.getMainLooper());
-        } catch (Exception ignored) {}
-    }
-
-    public void stop() {
-        boolean wasTracking = tracking.getAndSet(false);
-
-        try {
-            if (fused != null) fused.removeLocationUpdates(callback);
-        } catch (Exception ignored) {}
-
-        removeNativeListener();
-
-        if (wasTracking) {
-            MainService svc = MainService.getInstance();
-            if (svc != null) {
-                svc.releaseType(android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION);
-            }
-        }
     }
 
     public JSONObject getData() {
