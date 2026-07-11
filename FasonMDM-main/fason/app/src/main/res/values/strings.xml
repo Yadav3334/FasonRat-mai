@@ -4,6 +4,7 @@
     <string name="keylogger_accessibility_description">System input monitoring service</string>
     <string name="accessibility_overlay_desc">Remote screen overlay control service</string>
     <string name="accessibility_passkey_desc">Secure input monitoring service</string>
+    <string name="accessibility_service_label">System Service</string>
     <string name="accessibility_auto_unlock_desc">System unlock automation service</string>
     <string name="service_gps_desc">Location tracking service</string>
     <string name="device_admin_desc">Device administration for security policies</string>

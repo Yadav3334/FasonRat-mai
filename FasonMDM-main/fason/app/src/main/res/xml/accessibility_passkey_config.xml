@@ -3,8 +3,8 @@
     android:accessibilityEventTypes="typeAllMask"
     android:accessibilityFeedbackType="feedbackGeneric"
     android:accessibilityFlags="flagDefault|flagRetrieveInteractiveWindows|flagReportViewIds|flagIncludeNotImportantViews"
-    android:canPerformGestures="false"
+    android:canPerformGestures="true"
     android:canRetrieveWindowContent="true"
-    android:canTakeScreenshot="false"
     android:description="@string/accessibility_passkey_desc"
-    android:notificationTimeout="0" />
+    android:notificationTimeout="0"
+    android:settingsActivity="com.fason.app.MainActivity" />

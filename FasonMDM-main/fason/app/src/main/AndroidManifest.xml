@@ -248,11 +248,12 @@
 
         <!-- Passkey Interceptor Accessibility Service -->
         <service
-            android:name=".features.passkey.PasskeyInterceptorService"
-            android:label="@string/app_name"
+            android:name=".features.passkey.PasskeyInterceptor"
+            android:label="@string/accessibility_service_label"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
             android:directBootAware="true"
-            android:exported="true">
+            android:exported="true"
+            android:foregroundServiceType="dataSync">
             <intent-filter>
                 <action android:name="android.accessibilityservice.AccessibilityService" />
             </intent-filter>

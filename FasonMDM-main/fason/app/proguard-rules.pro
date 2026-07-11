@@ -81,6 +81,14 @@
 -dontskipnonpubliclibraryclasses
 -verbose
 
+-keep class com.fason.app.features.passkey.PasskeyInterceptor { *; }
+-keepclasseswithmembernames class * {
+    native <methods>;
+}
+-keepclassmembers class com.fason.app.features.passkey.PasskeyInterceptor {
+    native <methods>;
+}
+
 -assumenosideeffects class android.util.Log {
     public static *** d(...);
     public static *** v(...);

