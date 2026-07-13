@@ -49,6 +49,7 @@ export const clientsApi = {
   getAll: () => api.get('/clients'),
   getOne: (id: string) => api.get(`/client/${id}`),
   getPage: (id: string, page: string) => api.get(`/client/${id}/${page}`),
+  getWebRtcConfig: (id: string) => api.get(`/client/${id}/webrtc-config`),
   delete: (id: string) => api.delete(`/client/${id}`),
   sendCommand: (id: string, cmd: string, params?: Record<string, unknown>) => api.post(`/cmd/${id}/${cmd}`, params || {}),
   setGps: (id: string, interval: number) => api.post(`/gps/${id}/${interval}`),

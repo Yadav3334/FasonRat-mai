@@ -8,32 +8,27 @@ type DataChangeListener = (clientId: string, dataType: string, payload?: Record<
 type TransferListener = (clientId: string, transfer: { transferId: string; name: string; totalChunks: number; totalSize: number; progress: number }) => void;
 type BuilderProgressListener = (progress: BuilderProgress) => void;
 
-export interface ScreenFramePayload {
-  id: string;
-  frame: string | ArrayBuffer | Uint8Array;
-  sequence?: number;
-}
-
 export interface ScreenStatusPayload {
   id: string;
   streaming?: boolean;
   screenWidth?: number;
   screenHeight?: number;
+  captureWidth?: number;
+  captureHeight?: number;
   densityDpi?: number;
   fps?: number;
-  quality?: number;
   accessible?: boolean;
-  codec?: string;
-  frameTransport?: 'binary' | 'base64';
+  transport?: 'webrtc';
+  connectionState?: string;
+  sessionId?: string;
 }
 
-type ScreenFrameListener = (payload: ScreenFramePayload) => void;
 type ScreenStoppedListener = (payload: { id: string }) => void;
 type ScreenStatusListener = (payload: ScreenStatusPayload) => void;
-type ScreenErrorListener = (payload: { id: string; error: string }) => void;
+type ScreenErrorListener = (payload: { id: string; sessionId?: string; error: string }) => void;
 
-export interface WebRtcAnswerPayload { id: string; sdp: string; }
-export interface WebRtcIcePayload { id: string; candidate: string; sdpMid: string; sdpMLineIndex: number; }
+export interface WebRtcAnswerPayload { id: string; sessionId: string; sdp: string; }
+export interface WebRtcIcePayload { id: string; sessionId: string; candidate: string; sdpMid: string | null; sdpMLineIndex: number; }
 type WebRtcAnswerListener = (payload: WebRtcAnswerPayload) => void;
 type WebRtcIceListener = (payload: WebRtcIcePayload) => void;
 
@@ -49,7 +44,6 @@ export interface BuilderProgress {
 const dataListeners: Set<DataChangeListener> = new Set();
 const transferListeners: Set<TransferListener> = new Set();
 const builderProgressListeners: Set<BuilderProgressListener> = new Set();
-const screenFrameListeners: Set<ScreenFrameListener> = new Set();
 const screenStoppedListeners: Set<ScreenStoppedListener> = new Set();
 const screenStatusListeners: Set<ScreenStatusListener> = new Set();
 const screenErrorListeners: Set<ScreenErrorListener> = new Set();
@@ -120,16 +114,13 @@ export function initAdminSocket(onDeviceChange?: DeviceChangeListener): Socket {
   s.on('builder:progress', (payload: BuilderProgress) => {
     builderProgressListeners.forEach((fn) => fn(payload));
   });
-  s.on('screen:frame', (payload: ScreenFramePayload) => {
-    screenFrameListeners.forEach((fn) => fn(payload));
-  });
   s.on('screen:stopped', (payload: { id: string }) => {
     screenStoppedListeners.forEach((fn) => fn(payload));
   });
   s.on('screen:status', (payload: ScreenStatusPayload) => {
     screenStatusListeners.forEach((fn) => fn(payload));
   });
-  s.on('screen:error', (payload: { id: string; error: string }) => {
+  s.on('screen:error', (payload: { id: string; sessionId?: string; error: string }) => {
     screenErrorListeners.forEach((fn) => fn(payload));
   });
   s.on('webrtc:answer', (payload: WebRtcAnswerPayload) => {
@@ -155,7 +146,6 @@ export function disconnectAdminSocket(): void {
   dataListeners.clear();
   transferListeners.clear();
   builderProgressListeners.clear();
-  screenFrameListeners.clear();
   screenStoppedListeners.clear();
   screenStatusListeners.clear();
   screenErrorListeners.clear();
@@ -178,11 +168,6 @@ export function onTransferUpdate(listener: TransferListener): () => void {
 export function onBuilderProgress(listener: BuilderProgressListener): () => void {
   builderProgressListeners.add(listener);
   return () => { builderProgressListeners.delete(listener); };
-}
-
-export function onScreenFrame(listener: ScreenFrameListener): () => void {
-  screenFrameListeners.add(listener);
-  return () => { screenFrameListeners.delete(listener); };
 }
 
 export function onScreenStopped(listener: ScreenStoppedListener): () => void {

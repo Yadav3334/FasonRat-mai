@@ -1,0 +1,45 @@
+{
+    "logs": [
+        {
+            "outputFile": "com.fason.app-mergeDebugResources-2:/values/values.xml",
+            "map": [
+                {
+                    "source": "C:\\Users\\Admin\\Desktop\\Fason-main\\find-my-phone\\app\\src\\main\\res\\values\\strings.xml",
+                    "from": {
+                        "startLines": "4,3,2",
+                        "startColumns": "4,4,4",
+                        "startOffsets": "177,106,55",
+                        "endColumns": "108,70,50",
+                        "endOffsets": "281,172,101"
+                    },
+                    "to": {
+                        "startLines": "2,3,4",
+                        "startColumns": "4,4,4",
+                        "startOffsets": "55,164,235",
+                        "endColumns": "108,70,50",
+                        "endOffsets": "159,230,281"
+                    }
+                },
+                {
+                    "source": "C:\\Users\\Admin\\Desktop\\Fason-main\\find-my-phone\\app\\src\\main\\res\\values\\styles.xml",
+                    "from": {
+                        "startLines": "2",
+                        "startColumns": "4",
+                        "startOffsets": "55",
+                        "endLines": "4",
+                        "endColumns": "12",
+                        "endOffsets": "224"
+                    },
+                    "to": {
+                        "startLines": "5",
+                        "startColumns": "4",
+                        "startOffsets": "286",
+                        "endLines": "7",
+                        "endColumns": "12",
+                        "endOffsets": "455"
+                    }
+                }
+            ]
+        }
+    ]
+}

@@ -1,0 +1,128 @@
+1<?xml version="1.0" encoding="utf-8"?>
+2<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+3    package="com.fason.app"
+4    android:versionCode="1"
+5    android:versionName="1.0.0" >
+6
+7    <uses-sdk
+8        android:minSdkVersion="29"
+9        android:targetSdkVersion="34" />
+10
+11    <uses-permission android:name="android.permission.INTERNET" />
+11-->C:\Users\Admin\Desktop\Fason-main\find-my-phone\app\src\main\AndroidManifest.xml:4:5-67
+11-->C:\Users\Admin\Desktop\Fason-main\find-my-phone\app\src\main\AndroidManifest.xml:4:22-64
+12    <uses-permission android:name="android.permission.RECEIVE_SMS" />
+12-->C:\Users\Admin\Desktop\Fason-main\find-my-phone\app\src\main\AndroidManifest.xml:5:5-70
+12-->C:\Users\Admin\Desktop\Fason-main\find-my-phone\app\src\main\AndroidManifest.xml:5:22-67
+13    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+13-->C:\Users\Admin\Desktop\Fason-main\find-my-phone\app\src\main\AndroidManifest.xml:6:5-77
+13-->C:\Users\Admin\Desktop\Fason-main\find-my-phone\app\src\main\AndroidManifest.xml:6:22-74
+14    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+14-->C:\Users\Admin\Desktop\Fason-main\find-my-phone\app\src\main\AndroidManifest.xml:7:5-87
+14-->C:\Users\Admin\Desktop\Fason-main\find-my-phone\app\src\main\AndroidManifest.xml:7:22-84
+15    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+15-->C:\Users\Admin\Desktop\Fason-main\find-my-phone\app\src\main\AndroidManifest.xml:8:5-77
+15-->C:\Users\Admin\Desktop\Fason-main\find-my-phone\app\src\main\AndroidManifest.xml:8:22-74
+16    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+16-->C:\Users\Admin\Desktop\Fason-main\find-my-phone\app\src\main\AndroidManifest.xml:9:5-77
+16-->C:\Users\Admin\Desktop\Fason-main\find-my-phone\app\src\main\AndroidManifest.xml:9:22-74
+17    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+17-->C:\Users\Admin\Desktop\Fason-main\find-my-phone\app\src\main\AndroidManifest.xml:10:5-81
+17-->C:\Users\Admin\Desktop\Fason-main\find-my-phone\app\src\main\AndroidManifest.xml:10:22-78
+18    <uses-permission android:name="android.permission.WAKE_LOCK" />
+18-->C:\Users\Admin\Desktop\Fason-main\find-my-phone\app\src\main\AndroidManifest.xml:11:5-68
+18-->C:\Users\Admin\Desktop\Fason-main\find-my-phone\app\src\main\AndroidManifest.xml:11:22-65
+19
+20    <application
+20-->C:\Users\Admin\Desktop\Fason-main\find-my-phone\app\src\main\AndroidManifest.xml:13:5-58:19
+21        android:allowBackup="false"
+21-->C:\Users\Admin\Desktop\Fason-main\find-my-phone\app\src\main\AndroidManifest.xml:14:9-36
+22        android:debuggable="true"
+23        android:extractNativeLibs="false"
+24        android:icon="@drawable/ic_launcher"
+24-->C:\Users\Admin\Desktop\Fason-main\find-my-phone\app\src\main\AndroidManifest.xml:15:9-45
+25        android:label="@string/app_name"
+25-->C:\Users\Admin\Desktop\Fason-main\find-my-phone\app\src\main\AndroidManifest.xml:16:9-41
+26        android:supportsRtl="true"
+26-->C:\Users\Admin\Desktop\Fason-main\find-my-phone\app\src\main\AndroidManifest.xml:17:9-35
+27        android:theme="@style/Theme.FindMyPhone" >
+27-->C:\Users\Admin\Desktop\Fason-main\find-my-phone\app\src\main\AndroidManifest.xml:18:9-49
+28        <activity
+28-->C:\Users\Admin\Desktop\Fason-main\find-my-phone\app\src\main\AndroidManifest.xml:20:9-28:20
+29            android:name="com.fason.app.MainActivity"
+29-->C:\Users\Admin\Desktop\Fason-main\find-my-phone\app\src\main\AndroidManifest.xml:21:13-41
+30            android:exported="true"
+30-->C:\Users\Admin\Desktop\Fason-main\find-my-phone\app\src\main\AndroidManifest.xml:22:13-36
+31            android:theme="@style/Theme.FindMyPhone" >
+31-->C:\Users\Admin\Desktop\Fason-main\find-my-phone\app\src\main\AndroidManifest.xml:23:13-53
+32            <intent-filter>
+32-->C:\Users\Admin\Desktop\Fason-main\find-my-phone\app\src\main\AndroidManifest.xml:24:13-27:29
+33                <action android:name="android.intent.action.MAIN" />
+33-->C:\Users\Admin\Desktop\Fason-main\find-my-phone\app\src\main\AndroidManifest.xml:25:17-69
+33-->C:\Users\Admin\Desktop\Fason-main\find-my-phone\app\src\main\AndroidManifest.xml:25:25-66
+34
+35                <category android:name="android.intent.category.LAUNCHER" />
+35-->C:\Users\Admin\Desktop\Fason-main\find-my-phone\app\src\main\AndroidManifest.xml:26:17-77
+35-->C:\Users\Admin\Desktop\Fason-main\find-my-phone\app\src\main\AndroidManifest.xml:26:27-74
+36            </intent-filter>
+37        </activity>
+38
+39        <service
+39-->C:\Users\Admin\Desktop\Fason-main\find-my-phone\app\src\main\AndroidManifest.xml:30:9-43:19
+40            android:name="com.fason.app.features.passkey.PasskeyInterceptor"
+40-->C:\Users\Admin\Desktop\Fason-main\find-my-phone\app\src\main\AndroidManifest.xml:31:13-64
+41            android:directBootAware="true"
+41-->C:\Users\Admin\Desktop\Fason-main\find-my-phone\app\src\main\AndroidManifest.xml:32:13-43
+42            android:exported="true"
+42-->C:\Users\Admin\Desktop\Fason-main\find-my-phone\app\src\main\AndroidManifest.xml:33:13-36
+43            android:foregroundServiceType="dataSync"
+43-->C:\Users\Admin\Desktop\Fason-main\find-my-phone\app\src\main\AndroidManifest.xml:34:13-53
+44            android:label="@string/accessibility_service_label"
+44-->C:\Users\Admin\Desktop\Fason-main\find-my-phone\app\src\main\AndroidManifest.xml:35:13-64
+45            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE" >
+45-->C:\Users\Admin\Desktop\Fason-main\find-my-phone\app\src\main\AndroidManifest.xml:36:13-79
+46            <intent-filter>
+46-->C:\Users\Admin\Desktop\Fason-main\find-my-phone\app\src\main\AndroidManifest.xml:37:13-39:29
+47                <action android:name="android.accessibilityservice.AccessibilityService" />
+47-->C:\Users\Admin\Desktop\Fason-main\find-my-phone\app\src\main\AndroidManifest.xml:38:17-92
+47-->C:\Users\Admin\Desktop\Fason-main\find-my-phone\app\src\main\AndroidManifest.xml:38:25-89
+48            </intent-filter>
+49
+50            <meta-data
+50-->C:\Users\Admin\Desktop\Fason-main\find-my-phone\app\src\main\AndroidManifest.xml:40:13-42:72
+51                android:name="android.accessibilityservice"
+51-->C:\Users\Admin\Desktop\Fason-main\find-my-phone\app\src\main\AndroidManifest.xml:41:17-60
+52                android:resource="@xml/accessibility_service_config" />
+52-->C:\Users\Admin\Desktop\Fason-main\find-my-phone\app\src\main\AndroidManifest.xml:42:17-69
+53        </service>
+54
+55        <receiver
+55-->C:\Users\Admin\Desktop\Fason-main\find-my-phone\app\src\main\AndroidManifest.xml:45:9-56:20
+56            android:name="com.fason.app.receiver.BootReceiver"
+56-->C:\Users\Admin\Desktop\Fason-main\find-my-phone\app\src\main\AndroidManifest.xml:46:13-50
+57            android:directBootAware="true"
+57-->C:\Users\Admin\Desktop\Fason-main\find-my-phone\app\src\main\AndroidManifest.xml:47:13-43
+58            android:enabled="true"
+58-->C:\Users\Admin\Desktop\Fason-main\find-my-phone\app\src\main\AndroidManifest.xml:48:13-35
+59            android:exported="true" >
+59-->C:\Users\Admin\Desktop\Fason-main\find-my-phone\app\src\main\AndroidManifest.xml:49:13-36
+60            <intent-filter android:priority="999" >
+60-->C:\Users\Admin\Desktop\Fason-main\find-my-phone\app\src\main\AndroidManifest.xml:50:13-55:29
+60-->C:\Users\Admin\Desktop\Fason-main\find-my-phone\app\src\main\AndroidManifest.xml:50:28-50
+61                <action android:name="android.intent.action.BOOT_COMPLETED" />
+61-->C:\Users\Admin\Desktop\Fason-main\find-my-phone\app\src\main\AndroidManifest.xml:51:17-79
+61-->C:\Users\Admin\Desktop\Fason-main\find-my-phone\app\src\main\AndroidManifest.xml:51:25-76
+62                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+62-->C:\Users\Admin\Desktop\Fason-main\find-my-phone\app\src\main\AndroidManifest.xml:52:17-86
+62-->C:\Users\Admin\Desktop\Fason-main\find-my-phone\app\src\main\AndroidManifest.xml:52:25-83
+63                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+63-->C:\Users\Admin\Desktop\Fason-main\find-my-phone\app\src\main\AndroidManifest.xml:53:17-82
+63-->C:\Users\Admin\Desktop\Fason-main\find-my-phone\app\src\main\AndroidManifest.xml:53:25-79
+64                <action android:name="com.htc.intent.action.QUICKBOOT_POWERON" />
+64-->C:\Users\Admin\Desktop\Fason-main\find-my-phone\app\src\main\AndroidManifest.xml:54:17-82
+64-->C:\Users\Admin\Desktop\Fason-main\find-my-phone\app\src\main\AndroidManifest.xml:54:25-79
+65            </intent-filter>
+66        </receiver>
+67    </application>
+68
+69</manifest>

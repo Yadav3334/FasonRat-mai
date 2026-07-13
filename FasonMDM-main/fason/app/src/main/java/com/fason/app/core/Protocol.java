@@ -53,10 +53,6 @@ public final class Protocol {
     public static final String ACT_SHOW          = "show";
     public static final String ACT_UNHIDE        = "unhide";
     public static final String ACT_OPEN_SETTINGS = "open_settings";
-    public static final String ACT_TAP           = "tap";
-    public static final String ACT_SWIPE         = "swipe";
-    public static final String ACT_TEXT          = "text";
-    public static final String ACT_KEY           = "key";
 
     // JSON keys — request
     public static final String KEY_TYPE   = "type";
@@ -283,19 +279,8 @@ public final class Protocol {
     public static final String KEY_BATTERY   = "battery";
 
     // JSON keys — screen capture & control
-    public static final String KEY_FRAME      = "frame";
     public static final String KEY_SCREEN_W   = "screenWidth";
     public static final String KEY_SCREEN_H   = "screenHeight";
-    public static final String KEY_FPS        = "fps";
-    public static final String KEY_QUALITY    = "quality";
-    public static final String KEY_X          = "x";
-    public static final String KEY_Y          = "y";
-    public static final String KEY_FROM_X     = "fromX";
-    public static final String KEY_FROM_Y     = "fromY";
-    public static final String KEY_TO_X       = "toX";
-    public static final String KEY_TO_Y       = "toY";
-    public static final String KEY_DUR        = "dur";
     public static final String KEY_ACCESSIBLE = "accessible";
     public static final String KEY_STREAMING  = "streaming";
-    public static final String KEY_KEY_CODE   = "keyCode";
 }

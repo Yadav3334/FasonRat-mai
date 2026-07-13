@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { builderApi } from '@/services/api';
 import { onBuilderProgress, type BuilderProgress } from '@/services/socket';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
@@ -39,6 +39,7 @@ export default function BuilderPage() {
   const [serverUrl, setServerUrl] = useState(getDefaultServerUrl);
   const [homePageUrl, setHomePageUrl] = useState('https://google.com');
   const [appName, setAppName] = useState('Fason');
+  const [deviceSecret, setDeviceSecret] = useState('');
   const [iconFile, setIconFile] = useState<File | null>(null);
   const [iconPreview, setIconPreview] = useState<string | null>(null);
   const [building, setBuilding] = useState(false);
@@ -128,6 +129,7 @@ export default function BuilderPage() {
     if (!homePageUrl.match(/^https?:\/\/.+/)) { setError('Home Page URL must start with http:// or https://'); return; }
     if (!appName.trim()) { setError('App name is required'); return; }
     if (appName.trim().length > MAX_APP_NAME_LENGTH) { setError(`App name must be ${MAX_APP_NAME_LENGTH} characters or less`); return; }
+    if (deviceSecret.trim().length < 16) { setError('Device enrollment secret must be at least 16 characters'); return; }
 
     setBuilding(true);
     setProgress(null);
@@ -138,6 +140,7 @@ export default function BuilderPage() {
     formData.append('serverUrl', serverUrl.trim());
     formData.append('homePageUrl', homePageUrl.trim());
     formData.append('appName', appName.trim());
+    formData.append('deviceSecret', deviceSecret.trim());
     if (iconFile) formData.append('appIcon', iconFile);
 
     try {
@@ -251,6 +254,21 @@ export default function BuilderPage() {
               className="font-mono text-sm"
             />
             <p className="text-xs text-muted-foreground">The URL where your Fason server is running</p>
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="deviceSecret">Device enrollment secret</Label>
+            <Input
+              id="deviceSecret"
+              type="password"
+              value={deviceSecret}
+              onChange={(e) => { setDeviceSecret(e.target.value); setError(null); }}
+              placeholder="Must match DEVICE_SECRET on the backend"
+              disabled={building}
+              maxLength={256}
+              className="font-mono text-sm"
+            />
+            <p className="text-xs text-muted-foreground">Required for Internet deployments; use the same long random value as the server.</p>
           </div>
 
           <div className="space-y-2">

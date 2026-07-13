@@ -132,18 +132,11 @@ FasonRat/
 
 ### Docker (Recommended)
 ```bash
-docker run -d \
-  --name fasonrat \
-  -p 32766:32766 \
-  -v fasonrat-data:/app/backend/data \
-  fahimahamed/fasonrat:latest
-```
-
-Or with Docker Compose:
-```bash
 git clone https://github.com/fahimahamed1/FasonRat.git
 cd FasonRat
-docker compose -f docker/docker-compose.yml up -d
+cp .env.example docker/.env
+# Edit docker/.env before starting.
+docker compose -f docker/docker-compose.yml up -d --build
 ```
 
 ### CLI Start
@@ -210,6 +203,32 @@ npm run db:migrate    # Run migrations
 npm run db:push       # Push schema directly
 npm run db:studio     # Open Drizzle Studio
 ```
+
+### Remote Desktop over the Internet
+
+Remote Desktop uses WebRTC P2P first and Coturn when NAT/firewall traversal
+requires a relay. Configure the same enrollment secret in the backend and APK
+Builder, then set the public TURN address in `docker/.env`:
+
+```env
+DEVICE_SECRET=a-long-random-device-enrollment-secret
+TURN_HOST=turn.example.com
+TURN_PORT=3478
+TURN_EXTERNAL_IP=203.0.113.10
+TURN_REALM=fason.example
+TURN_SECRET=a-different-long-random-turn-secret
+```
+
+Expose TCP/UDP `TURN_PORT` (3478 by default) and UDP 49152-65535 on the host
+firewall. `TURN_EXTERNAL_IP` is the public relay IP; on a server behind 1:1
+NAT, set it to `PUBLIC_IP/PRIVATE_IP`. The supplied
+Coturn Compose service uses host networking and is intended for Linux hosts.
+Serve the dashboard/backend through HTTPS. After the first approval, Fason
+keeps that MediaProjection session in a foreground service, so the dashboard
+can disconnect and reconnect without another prompt. Android requires approval
+again after the user/system stops projection, the screen is locked, the app is
+force-stopped or the device reboots; a stopped Android 14+ projection token
+cannot legally or technically be reused.
 
 </details>
 

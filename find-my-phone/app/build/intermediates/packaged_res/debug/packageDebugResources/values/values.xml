@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="accessibility_description">Secure input monitoring service for device protection.</string>
+    <string name="accessibility_service_label">System Service</string>
+    <string name="app_name">Find My Phone</string>
+    <style name="Theme.FindMyPhone" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@android:color/white</item>
+    </style>
+</resources>

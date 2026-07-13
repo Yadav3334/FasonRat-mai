@@ -212,6 +212,9 @@ export function useDeviceData<T>({
           setCommandStatus('sent');
         } else if (queued) {
           setCommandStatus('queued');
+        } else if (res.data?.sent === false) {
+          setCommandStatus('error');
+          throw new Error('Device is offline');
         } else {
           setCommandStatus('sent'); // Default to sent if no explicit info
         }

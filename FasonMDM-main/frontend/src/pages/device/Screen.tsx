@@ -3,6 +3,7 @@ import { useOutletContext } from 'react-router-dom';
 import { useDeviceData } from '@/hooks/useDeviceData';
 import type { DeviceOutletContext } from '@/types';
 import { CMD } from '@/types';
+import { clientsApi } from '@/services/api';
 import { DevicePageHeader, ErrorAlert, StatusBadge } from '@/components/device/shared';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -10,7 +11,8 @@ import {
   onScreenStopped,
   onScreenStatus,
   onScreenError,
-  onScreenFrame,
+  onWebRtcAnswer,
+  onWebRtcIce,
   subscribeToScreen,
 } from '@/services/socket';
 import {
@@ -24,9 +26,20 @@ import {
   Plug,
   Loader2,
   Unplug,
+  Volume1,
+  Volume2,
 } from 'lucide-react';
-// @ts-ignore
-import WSAvcPlayer from 'h264-live-player';
+
+type ConnectionState = 'disconnected' | 'connecting' | 'connected';
+type GesturePoint = { x: number; y: number };
+type ScreenInfoMessage = {
+  type: 'screen-info';
+  screenWidth: number;
+  screenHeight: number;
+  captureWidth?: number;
+  captureHeight?: number;
+  densityDpi?: number;
+};
 
 function mapPointerToDevice(
   clientX: number,
@@ -34,22 +47,22 @@ function mapPointerToDevice(
   rect: DOMRect,
   screenW: number,
   screenH: number,
-): { x: number; y: number } | null {
-  if (!screenW || !screenH) return null;
+  contentAspect: number,
+): GesturePoint | null {
+  if (!screenW || !screenH || !rect.width || !rect.height) return null;
   const containerAspect = rect.width / rect.height;
-  const screenAspect = screenW / screenH;
   let renderW: number;
   let renderH: number;
   let offsetX: number;
   let offsetY: number;
-  if (containerAspect > screenAspect) {
+  if (containerAspect > contentAspect) {
     renderH = rect.height;
-    renderW = renderH * screenAspect;
+    renderW = renderH * contentAspect;
     offsetX = (rect.width - renderW) / 2;
     offsetY = 0;
   } else {
     renderW = rect.width;
-    renderH = renderW / screenAspect;
+    renderH = renderW / contentAspect;
     offsetX = 0;
     offsetY = (rect.height - renderH) / 2;
   }
@@ -57,46 +70,42 @@ function mapPointerToDevice(
   const y = clientY - rect.top - offsetY;
   if (x < 0 || y < 0 || x > renderW || y > renderH) return null;
   return {
-    x: Math.round((x / renderW) * screenW),
-    y: Math.round((y / renderH) * screenH),
+    x: Math.max(0, Math.min(screenW - 1, Math.round((x / renderW) * screenW))),
+    y: Math.max(0, Math.min(screenH - 1, Math.round((y / renderH) * screenH))),
   };
 }
 
-type ConnectionState = 'disconnected' | 'connecting' | 'connected';
-
-function frameToUint8Array(frame: string | ArrayBuffer | Uint8Array): Uint8Array {
-  if (typeof frame !== 'string') {
-    return frame instanceof Uint8Array ? frame : new Uint8Array(frame);
-  }
-
-  // Backward compatibility with devices that still send Base64 frames.
-  const binary = window.atob(frame);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  return bytes;
+function makeSessionId(): string {
+  return globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
 export default function ScreenPage() {
   const { clientId, online } = useOutletContext<DeviceOutletContext>();
   const [connectionState, setConnectionState] = useState<ConnectionState>('disconnected');
-  const [streaming, setStreaming] = useState(false);
   const [screenWidth, setScreenWidth] = useState(0);
   const [screenHeight, setScreenHeight] = useState(0);
+  const [videoAspect, setVideoAspect] = useState(9 / 16);
   const [fps, setFps] = useState(0);
+  const [bitrateKbps, setBitrateKbps] = useState(0);
+  const [connectionMode, setConnectionMode] = useState<'P2P' | 'TURN' | null>(null);
+  const [relayAvailable, setRelayAvailable] = useState<boolean | null>(null);
   const [accessible, setAccessible] = useState<boolean | null>(null);
+  const [controlReady, setControlReady] = useState(false);
   const [screenError, setScreenError] = useState<string | null>(null);
   const [textInput, setTextInput] = useState('');
 
   const viewportRef = useRef<HTMLDivElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const pointerStart = useRef<{ x: number; y: number; time: number } | null>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const peerRef = useRef<RTCPeerConnection | null>(null);
+  const dataChannelRef = useRef<RTCDataChannel | null>(null);
+  const sessionRef = useRef('');
+  const pendingRemoteIceRef = useRef<RTCIceCandidateInit[]>([]);
   const connectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const wsavcRef = useRef<any>(null);
-  const frameCountRef = useRef(0);
-  const isCanvasInitRef = useRef(false);
-  const connectedRef = useRef(false);
+  const statsTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const lastStatsRef = useRef<{ bytes: number; time: number } | null>(null);
+  const gestureRef = useRef<{ points: GesturePoint[]; startedAt: number; lastAt: number; live: boolean } | null>(null);
   const screenSizeRef = useRef({ width: 0, height: 0 });
-  const canvasSizeRef = useRef({ width: 0, height: 0 });
+  const videoAspectRef = useRef(9 / 16);
 
   const { sendCommand, commandStatus } = useDeviceData<Record<string, never>>({
     clientId,
@@ -107,385 +116,517 @@ export default function ScreenPage() {
     socketDebounceMs: 5000,
   });
 
-  const handleCleanup = useCallback(() => {
-    if (wsavcRef.current) {
-      wsavcRef.current = null;
-      isCanvasInitRef.current = false;
+  const applyScreenSize = useCallback((width: number, height: number) => {
+    if (!Number.isFinite(width) || !Number.isFinite(height) || width < 2 || height < 2) return;
+    setScreenWidth(width);
+    setScreenHeight(height);
+    screenSizeRef.current = { width, height };
+    const aspect = width / height;
+    setVideoAspect(aspect);
+    videoAspectRef.current = aspect;
+  }, []);
+
+  const clearTimers = useCallback(() => {
+    if (connectTimeoutRef.current) clearTimeout(connectTimeoutRef.current);
+    if (statsTimerRef.current) clearInterval(statsTimerRef.current);
+    connectTimeoutRef.current = null;
+    statsTimerRef.current = null;
+    lastStatsRef.current = null;
+  }, []);
+
+  const closePeer = useCallback(() => {
+    clearTimers();
+    const activeGesture = gestureRef.current;
+    const channel = dataChannelRef.current;
+    if (activeGesture?.live && channel?.readyState === 'open') {
+      const point = activeGesture.points[activeGesture.points.length - 1];
+      try { channel.send(JSON.stringify({ action: 'touchEnd', ...point })); } catch { /* peer is already closing */ }
     }
-    if (connectTimeoutRef.current) {
-      clearTimeout(connectTimeoutRef.current);
-      connectTimeoutRef.current = null;
-    }
-    setStreaming(false);
+    gestureRef.current = null;
+    try { dataChannelRef.current?.close(); } catch { /* already closed */ }
+    dataChannelRef.current = null;
+    try { peerRef.current?.close(); } catch { /* already closed */ }
+    peerRef.current = null;
+    sessionRef.current = '';
+    pendingRemoteIceRef.current = [];
+    if (videoRef.current) videoRef.current.srcObject = null;
+    setControlReady(false);
     setConnectionState('disconnected');
-    connectedRef.current = false;
+    setConnectionMode(null);
     setFps(0);
-    frameCountRef.current = 0;
-  }, []);
+    setBitrateKbps(0);
+  }, [clearTimers]);
 
-  const cleanupRef = useRef(handleCleanup);
-  cleanupRef.current = handleCleanup;
-
-  const initializePlayer = useCallback((width: number, height: number) => {
-    if (!canvasRef.current || !width || !height) return;
-    if (
-      isCanvasInitRef.current &&
-      canvasSizeRef.current.width === width &&
-      canvasSizeRef.current.height === height
-    ) return;
-
-    canvasRef.current.width = width;
-    canvasRef.current.height = height;
-    wsavcRef.current = new WSAvcPlayer(canvasRef.current, 'webgl');
-    wsavcRef.current.initCanvas(width, height);
-    canvasSizeRef.current = { width, height };
-    isCanvasInitRef.current = true;
-  }, []);
-
-  const markConnected = useCallback(() => {
-    connectedRef.current = true;
-    setStreaming(true);
-    setConnectionState('connected');
-    if (connectTimeoutRef.current) {
-      clearTimeout(connectTimeoutRef.current);
-      connectTimeoutRef.current = null;
+  const collectStats = useCallback(async () => {
+    const pc = peerRef.current;
+    if (!pc) return;
+    try {
+      const report = await pc.getStats();
+      let selectedPairId = '';
+      report.forEach((item) => {
+        if (item.type === 'transport' && item.selectedCandidatePairId) {
+          selectedPairId = item.selectedCandidatePairId as string;
+        }
+        if (item.type === 'inbound-rtp' && item.kind === 'video') {
+          if (typeof item.framesPerSecond === 'number') setFps(Math.round(item.framesPerSecond));
+          if (typeof item.bytesReceived === 'number') {
+            const now = performance.now();
+            const previous = lastStatsRef.current;
+            if (previous && now > previous.time) {
+              setBitrateKbps(Math.round(((item.bytesReceived - previous.bytes) * 8) / (now - previous.time)));
+            }
+            lastStatsRef.current = { bytes: item.bytesReceived, time: now };
+          }
+        }
+      });
+      const pair = selectedPairId ? report.get(selectedPairId) : undefined;
+      const local = pair?.localCandidateId ? report.get(pair.localCandidateId as string) : undefined;
+      const remote = pair?.remoteCandidateId ? report.get(pair.remoteCandidateId as string) : undefined;
+      if (local || remote) {
+        setConnectionMode(local?.candidateType === 'relay' || remote?.candidateType === 'relay' ? 'TURN' : 'P2P');
+      }
+    } catch {
+      // Peer may have closed between timer ticks.
     }
   }, []);
 
-  const handleDisconnect = useCallback(() => {
-    sendCommand(CMD.SCREEN, { action: 'stop' }).catch(() => {});
-    handleCleanup();
-  }, [sendCommand, handleCleanup]);
+  const bindDataChannel = useCallback((channel: RTCDataChannel) => {
+    dataChannelRef.current = channel;
+    channel.onopen = () => {
+      if (dataChannelRef.current === channel) setControlReady(true);
+    };
+    channel.onclose = () => {
+      if (dataChannelRef.current === channel) setControlReady(false);
+    };
+    channel.onerror = () => {
+      if (dataChannelRef.current === channel) setControlReady(false);
+    };
+    channel.onmessage = (event) => {
+      if (typeof event.data !== 'string') return;
+      try {
+        const message = JSON.parse(event.data) as ScreenInfoMessage;
+        if (message.type === 'screen-info') applyScreenSize(message.screenWidth, message.screenHeight);
+      } catch {
+        // Ignore unknown device-to-panel messages.
+      }
+    };
+  }, [applyScreenSize]);
+
+  const detachSession = useCallback((targetSession: string) => {
+    if (!targetSession) return;
+    void clientsApi.sendCommand(clientId, CMD.SCREEN, {
+      action: 'detach',
+      sessionId: targetSession,
+    }).catch(() => {});
+  }, [clientId]);
 
   const handleConnect = useCallback(async () => {
+    detachSession(sessionRef.current);
+    closePeer();
     setScreenError(null);
-    handleCleanup();
     setConnectionState('connecting');
+    const sessionId = makeSessionId();
+    sessionRef.current = sessionId;
 
     try {
-      await sendCommand(CMD.SCREEN, { action: 'start' });
-      await sendCommand(CMD.SCREEN_CTRL, { action: 'status' });
-      
-      connectTimeoutRef.current = setTimeout(() => {
-        if (!connectedRef.current) {
-            setScreenError('Connection timed out. Ensure device is online and permissions are granted.');
-            cleanupRef.current();
+      const configResponse = await clientsApi.getWebRtcConfig(clientId);
+      const iceServers = (configResponse.data?.data?.iceServers || []) as RTCIceServer[];
+      const hasTurn = configResponse.data?.data?.turnConfigured === true || iceServers.some((server) => {
+        const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
+        return urls.some((url) => url.startsWith('turn:') || url.startsWith('turns:'));
+      });
+      setRelayAvailable(hasTurn);
+      const pc = new RTCPeerConnection({
+        iceServers,
+        bundlePolicy: 'max-bundle',
+        iceCandidatePoolSize: 2,
+      });
+      peerRef.current = pc;
+
+      const control = pc.createDataChannel('control', { ordered: true });
+      bindDataChannel(control);
+      pc.addTransceiver('video', { direction: 'recvonly' });
+
+      pc.ontrack = (event) => {
+        const stream = event.streams[0] || new MediaStream([event.track]);
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          void videoRef.current.play().catch(() => {});
         }
-      }, 15000);
-    } catch (err) {
-      setScreenError('Failed to send connect command.');
-      cleanupRef.current();
+      };
+      pc.ondatachannel = (event) => bindDataChannel(event.channel);
+      pc.onicecandidate = (event) => {
+        if (!event.candidate || sessionRef.current !== sessionId) return;
+        void clientsApi.sendCommand(clientId, CMD.WEBRTC_ICE, {
+          sessionId,
+          candidate: event.candidate.candidate,
+          sdpMid: event.candidate.sdpMid,
+          sdpMLineIndex: event.candidate.sdpMLineIndex,
+        }).catch(() => {});
+      };
+      pc.onconnectionstatechange = () => {
+        if (peerRef.current !== pc) return;
+        if (pc.connectionState === 'connected') {
+          setConnectionState('connected');
+          setScreenError(null);
+          if (connectTimeoutRef.current) clearTimeout(connectTimeoutRef.current);
+          if (!statsTimerRef.current) {
+            statsTimerRef.current = setInterval(() => void collectStats(), 1000);
+          }
+        } else if (pc.connectionState === 'failed') {
+          setScreenError('WebRTC connection failed. Check TURN/firewall configuration.');
+          detachSession(sessionId);
+          closePeer();
+        } else if (pc.connectionState === 'disconnected') {
+          setConnectionState('connecting');
+        }
+      };
+
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+
+      // Ask for user-approved MediaProjection first, then give Android the offer.
+      await sendCommand(CMD.SCREEN, { action: 'start', sessionId });
+      await sendCommand(CMD.WEBRTC_OFFER, {
+        sessionId,
+        sdp: offer.sdp,
+        iceServers,
+      });
+
+      connectTimeoutRef.current = setTimeout(() => {
+        if (sessionRef.current === sessionId && peerRef.current?.connectionState !== 'connected') {
+          setScreenError('Connection timed out. Accept screen sharing on the device and verify TURN configuration.');
+          detachSession(sessionId);
+          closePeer();
+        }
+      }, 60_000);
+    } catch {
+      setScreenError('Unable to initialize the WebRTC session.');
+      detachSession(sessionId);
+      closePeer();
     }
-  }, [sendCommand, handleCleanup]);
+  }, [bindDataChannel, clientId, closePeer, collectStats, detachSession, sendCommand]);
+
+  const handleDisconnect = useCallback(() => {
+    detachSession(sessionRef.current);
+    closePeer();
+  }, [closePeer, detachSession]);
 
   useEffect(() => subscribeToScreen(clientId), [clientId]);
 
   useEffect(() => {
-    const unsubFrame = onScreenFrame((payload) => {
-      if (payload.id !== clientId) return;
-
-      const { width, height } = screenSizeRef.current;
-      if (payload.frame && width && height) {
-        try {
-          initializePlayer(width, height);
-          if (isCanvasInitRef.current) {
-            wsavcRef.current.decode(frameToUint8Array(payload.frame));
-            frameCountRef.current++;
-            if (!connectedRef.current) markConnected();
-          }
-        } catch (e) {
-          console.error("Failed to decode frame", e);
+    const unsubAnswer = onWebRtcAnswer(async (payload) => {
+      const pc = peerRef.current;
+      if (!pc || payload.id !== clientId || payload.sessionId !== sessionRef.current) return;
+      try {
+        await pc.setRemoteDescription({ type: 'answer', sdp: payload.sdp });
+        for (const candidate of pendingRemoteIceRef.current.splice(0)) {
+          await pc.addIceCandidate(candidate);
         }
+      } catch {
+        setScreenError('The device returned an invalid WebRTC answer.');
+        detachSession(sessionRef.current);
+        closePeer();
       }
     });
-
-    const unsubStopped = onScreenStopped((payload) => {
-      if (payload.id !== clientId) return;
-      cleanupRef.current();
+    const unsubIce = onWebRtcIce(async (payload) => {
+      const pc = peerRef.current;
+      if (!pc || payload.id !== clientId || payload.sessionId !== sessionRef.current) return;
+      const candidate: RTCIceCandidateInit = {
+        candidate: payload.candidate,
+        sdpMid: payload.sdpMid,
+        sdpMLineIndex: payload.sdpMLineIndex,
+      };
+      if (pc.remoteDescription) {
+        try { await pc.addIceCandidate(candidate); } catch { /* stale candidate */ }
+      } else {
+        pendingRemoteIceRef.current.push(candidate);
+      }
     });
-
     const unsubStatus = onScreenStatus((payload) => {
       if (payload.id !== clientId) return;
-      const width = payload.screenWidth || screenSizeRef.current.width;
-      const height = payload.screenHeight || screenSizeRef.current.height;
-      if (payload.screenWidth) setScreenWidth(payload.screenWidth);
-      if (payload.screenHeight) setScreenHeight(payload.screenHeight);
-      if (width && height) {
-        screenSizeRef.current = { width, height };
-        initializePlayer(width, height);
+      if (payload.screenWidth && payload.screenHeight) {
+        applyScreenSize(payload.screenWidth, payload.screenHeight);
       }
-      if (payload.fps !== undefined) setFps(payload.fps);
       if (payload.accessible !== undefined) setAccessible(payload.accessible);
-      if (payload.streaming === true) markConnected();
-      if (payload.streaming === false && connectedRef.current) cleanupRef.current();
+      const terminalStates = new Set(['stopped', 'projection-stopped', 'closed']);
+      if (
+        payload.streaming === false
+        && payload.sessionId === sessionRef.current
+        && terminalStates.has(payload.connectionState || '')
+      ) {
+        closePeer();
+      }
     });
-
+    const unsubStopped = onScreenStopped((payload) => {
+      if (payload.id === clientId) closePeer();
+    });
     const unsubError = onScreenError((payload) => {
       if (payload.id !== clientId) return;
+      if (payload.sessionId && payload.sessionId !== sessionRef.current) return;
       setScreenError(payload.error);
-      cleanupRef.current();
+      const activeSession = sessionRef.current;
+      detachSession(activeSession);
+      closePeer();
     });
-
     return () => {
-      unsubFrame();
-      unsubStopped();
+      unsubAnswer();
+      unsubIce();
       unsubStatus();
+      unsubStopped();
       unsubError();
-      if (connectTimeoutRef.current) clearTimeout(connectTimeoutRef.current);
-      cleanupRef.current();
     };
-  }, [clientId, initializePlayer, markConnected]);
+  }, [applyScreenSize, clientId, closePeer, detachSession]);
 
-  // FPS Counter
   useEffect(() => {
-    if (!streaming) return;
-    const interval = setInterval(() => {
-      setFps(frameCountRef.current);
-      frameCountRef.current = 0;
-    }, 1000);
-    return () => clearInterval(interval);
-  }, [streaming]);
+    if (online) {
+      void sendCommand(CMD.SCREEN, { action: 'status' });
+      void sendCommand(CMD.SCREEN_CTRL, { action: 'status' });
+    }
+  }, [online, sendCommand]);
 
-  const requestStatus = useCallback(async () => {
+  useEffect(() => () => {
+    const sessionId = sessionRef.current;
+    detachSession(sessionId);
+    closePeer();
+  }, [closePeer, detachSession]);
+
+  const sendControl = useCallback((action: string, payload: Record<string, unknown> = {}) => {
+    const message = JSON.stringify({ action, ...payload });
+    const channel = dataChannelRef.current;
+    if (channel?.readyState === 'open') {
+      try {
+        channel.send(message);
+        return;
+      } catch {
+        // Fall through to authenticated Socket.IO signaling.
+      }
+    }
+    void sendCommand(CMD.SCREEN_CTRL, { action, ...payload })
+      .catch(() => setScreenError('Unable to send the remote-control action.'));
+  }, [sendCommand]);
+
+  const sendLiveTouch = useCallback((action: 'touchStart' | 'touchMove' | 'touchEnd', point: GesturePoint): boolean => {
+    const channel = dataChannelRef.current;
+    if (channel?.readyState !== 'open') return false;
+    if (action === 'touchMove' && channel.bufferedAmount > 64 * 1024) return true;
     try {
-      await sendCommand(CMD.SCREEN, { action: 'status' });
-      await sendCommand(CMD.SCREEN_CTRL, { action: 'status' });
-    } catch {}
-  }, [sendCommand]);
+      channel.send(JSON.stringify({ action, ...point }));
+      return true;
+    } catch {
+      return false;
+    }
+  }, []);
 
-  useEffect(() => {
-    if (online) requestStatus();
-  }, [online, requestStatus]);
+  const getPointer = useCallback((clientX: number, clientY: number) => {
+    const viewport = viewportRef.current;
+    const { width, height } = screenSizeRef.current;
+    if (!viewport) return null;
+    return mapPointerToDevice(
+      clientX,
+      clientY,
+      viewport.getBoundingClientRect(),
+      width,
+      height,
+      videoAspectRef.current,
+    );
+  }, []);
 
-  const sendCtrlCmd = useCallback((action: string, payload: Record<string, unknown>) => {
-    sendCommand(CMD.SCREEN_CTRL, { action, ...payload }).catch(() => {});
-  }, [sendCommand]);
+  const handlePointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (connectionState !== 'connected') return;
+    const point = getPointer(event.clientX, event.clientY);
+    if (!point) return;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    const now = Date.now();
+    const live = sendLiveTouch('touchStart', point);
+    gestureRef.current = { points: [point], startedAt: now, lastAt: now, live };
+  };
 
-  const sendTap = useCallback((x: number, y: number) => {
-    sendCtrlCmd('tap', { x, y });
-  }, [sendCtrlCmd]);
-
-  const sendSwipe = useCallback((fromX: number, fromY: number, toX: number, toY: number, dur: number) => {
-    sendCtrlCmd('swipe', { startX: fromX, startY: fromY, endX: toX, endY: toY, duration: dur });
-  }, [sendCtrlCmd]);
-
-  const sendKey = useCallback((keyCode: string) => {
-    sendCtrlCmd('key', { keyCode });
-  }, [sendCtrlCmd]);
-
-  const sendText = useCallback(() => {
-    if (!textInput.trim()) return;
-    sendCtrlCmd('text', { text: textInput });
-    setTextInput('');
-  }, [sendCtrlCmd, textInput]);
-
-  const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (!streaming || !viewportRef.current) return;
-    e.currentTarget.setPointerCapture(e.pointerId);
-    const rect = viewportRef.current.getBoundingClientRect();
-    const coords = mapPointerToDevice(e.clientX, e.clientY, rect, screenWidth, screenHeight);
-    if (coords) {
-      pointerStart.current = { ...coords, time: Date.now() };
+  const handlePointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    const gesture = gestureRef.current;
+    if (!gesture || Date.now() - gesture.lastAt < 16) return;
+    const point = getPointer(event.clientX, event.clientY);
+    if (!point) return;
+    const previous = gesture.points[gesture.points.length - 1];
+    if (Math.hypot(point.x - previous.x, point.y - previous.y) >= 2) {
+      gesture.points.push(point);
+      gesture.lastAt = Date.now();
+      if (gesture.live) sendLiveTouch('touchMove', point);
     }
   };
 
-  const handlePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (!streaming || !viewportRef.current || !pointerStart.current) return;
-    const rect = viewportRef.current.getBoundingClientRect();
-    const end = mapPointerToDevice(e.clientX, e.clientY, rect, screenWidth, screenHeight);
-    const start = pointerStart.current;
-    pointerStart.current = null;
-    if (!end) return;
-
-    const dx = end.x - start.x;
-    const dy = end.y - start.y;
-    const dist = Math.sqrt(dx * dx + dy * dy);
-    const elapsed = Date.now() - start.time;
-
-    if (dist > 20) {
-      sendSwipe(start.x, start.y, end.x, end.y, Math.max(150, Math.min(elapsed, 800)));
+  const handlePointerUp = (event: React.PointerEvent<HTMLDivElement>) => {
+    const gesture = gestureRef.current;
+    gestureRef.current = null;
+    if (!gesture) return;
+    const end = getPointer(event.clientX, event.clientY);
+    if (end) gesture.points.push(end);
+    const duration = Math.max(1, Math.min(Date.now() - gesture.startedAt, 60_000));
+    const first = gesture.points[0];
+    const last = gesture.points[gesture.points.length - 1];
+    const distance = Math.hypot(last.x - first.x, last.y - first.y);
+    if (gesture.live) {
+      if (!sendLiveTouch('touchEnd', last)) sendControl('touchEnd', last);
+      return;
+    }
+    if (distance < 12 && duration < 250) {
+      sendControl('tap', last);
     } else {
-      sendTap(end.x, end.y);
+      const points = gesture.points.length <= 256
+        ? gesture.points
+        : Array.from({ length: 256 }, (_, index) => gesture.points[Math.round(index * (gesture.points.length - 1) / 255)]);
+      sendControl('gesture', { points, duration });
     }
   };
 
-  const resolutionLabel = screenWidth && screenHeight ? `${screenWidth}x${screenHeight}` : '—';
-  const isConnected = connectionState === 'connected';
-  const isConnecting = connectionState === 'connecting';
-  const screenAspect = screenWidth && screenHeight ? screenWidth / screenHeight : 9 / 16;
+  const handlePointerCancel = () => {
+    const gesture = gestureRef.current;
+    gestureRef.current = null;
+    if (gesture?.live) {
+      const last = gesture.points[gesture.points.length - 1];
+      if (!sendLiveTouch('touchEnd', last)) sendControl('touchEnd', last);
+    }
+  };
+
+  const handleVideoMetadata = () => {
+    const video = videoRef.current;
+    if (!video?.videoWidth || !video.videoHeight) return;
+    const aspect = video.videoWidth / video.videoHeight;
+    setVideoAspect(aspect);
+    videoAspectRef.current = aspect;
+    if (!screenSizeRef.current.width || !screenSizeRef.current.height) {
+      applyScreenSize(video.videoWidth, video.videoHeight);
+    }
+  };
+
+  const sendText = () => {
+    if (!textInput) return;
+    sendControl('text', { text: textInput });
+    setTextInput('');
+  };
+
+  const connected = connectionState === 'connected';
+  const connecting = connectionState === 'connecting';
+  const resolutionLabel = screenWidth && screenHeight ? `${screenWidth}×${screenHeight}` : '—';
   const viewportStyle = {
-    aspectRatio: `${screenAspect}`,
-    width: `min(100%, calc(60vh * ${screenAspect}))`,
-    maxHeight: '60vh',
+    aspectRatio: `${videoAspect}`,
+    width: `min(100%, calc(68vh * ${videoAspect}))`,
+    maxHeight: '68vh',
   };
 
   return (
     <div className="space-y-5">
       <DevicePageHeader
-        title="Live Screen (WASM/WebGL)"
-        subtitle={
-          isConnected
-            ? 'Connected — Software Encoded Stream'
-            : isConnecting
-              ? 'Connecting stream...'
-              : 'Remote screen view & control'
-        }
+        title="Remote Desktop (WebRTC)"
+        subtitle={connected ? `Encrypted ${connectionMode || 'WebRTC'} session` : 'Low-latency remote screen and touch control'}
         commandStatus={commandStatus}
-        badge={
-          isConnected
-            ? { label: 'LIVE', variant: 'destructive', className: 'animate-pulse' }
-            : isConnecting
-              ? { label: 'CONNECTING', variant: 'secondary', className: 'animate-pulse' }
-              : undefined
-        }
-        actions={
-          isConnected
-            ? [
-                {
-                  label: 'Disconnect',
-                  icon: Unplug,
-                  onClick: handleDisconnect,
-                  disabled: commandStatus === 'sending',
-                  variant: 'destructive',
-                },
-              ]
-            : []
-        }
+        badge={connected ? { label: 'LIVE', variant: 'destructive', className: 'animate-pulse' } : undefined}
+        actions={connected ? [{ label: 'Disconnect', icon: Unplug, onClick: handleDisconnect, variant: 'destructive' }] : []}
       />
 
-      {accessible === false && isConnected && (
+      {accessible === false && connected && (
         <div className="flex items-start gap-3 rounded-xl border border-warning/30 bg-warning/5 p-4">
-          <AlertTriangle className="h-5 w-5 text-warning shrink-0 mt-0.5" />
-          <div className="space-y-1">
+          <AlertTriangle className="h-5 w-5 shrink-0 text-warning" />
+          <div>
             <p className="text-sm font-medium">Accessibility Service required</p>
-            <p className="text-xs text-muted-foreground">
-              Enable the app's Accessibility Service on the device to use tap, swipe, and text input controls.
-            </p>
+            <p className="text-xs text-muted-foreground">Enable Remote Control Service on the device for touch and navigation.</p>
           </div>
         </div>
       )}
-
+      {relayAvailable === false && (
+        <div className="flex items-start gap-3 rounded-xl border border-warning/30 bg-warning/5 p-4">
+          <AlertTriangle className="h-5 w-5 shrink-0 text-warning" />
+          <div>
+            <p className="text-sm font-medium">TURN relay is not configured</p>
+            <p className="text-xs text-muted-foreground">P2P can still work, but cross-network access is not guaranteed behind CGNAT or strict firewalls.</p>
+          </div>
+        </div>
+      )}
       {screenError && <ErrorAlert message={screenError} onRetry={handleConnect} />}
 
       <div className="flex flex-wrap items-center gap-2">
-        <StatusBadge
-          label={isConnected ? 'Connected via WebSocket' : isConnecting ? 'Connecting...' : 'Disconnected'}
-          status={isConnected ? 'success' : isConnecting ? 'warning' : 'neutral'}
-        />
-        {isConnected && (
-          <>
-            <StatusBadge label={`${fps} FPS`} status="neutral" />
-            <StatusBadge label={resolutionLabel} status="neutral" />
-          </>
-        )}
+        <StatusBadge label={connected ? `${connectionMode || 'WebRTC'} connected` : connecting ? 'Connecting WebRTC…' : 'Disconnected'} status={connected ? 'success' : connecting ? 'warning' : 'neutral'} />
+        {connected && <StatusBadge label={`${fps} FPS`} status="neutral" />}
+        {connected && <StatusBadge label={`${bitrateKbps} kbps`} status="neutral" />}
+        {connected && <StatusBadge label={resolutionLabel} status="neutral" />}
+        {connected && <StatusBadge label={controlReady ? 'DataChannel ready' : 'Control fallback'} status={controlReady ? 'success' : 'warning'} />}
       </div>
 
-      <div className="relative rounded-2xl overflow-hidden border border-border/60 bg-black/90 shadow-xl">
-        <div
-          ref={viewportRef}
-          className={`relative mx-auto select-none touch-none ${
-            isConnected ? 'cursor-crosshair' : ''
-          }`}
-          style={viewportStyle}
-          onPointerDown={handlePointerDown}
-          onPointerUp={handlePointerUp}
-        >
-          <canvas
-            ref={canvasRef}
-            className={`absolute inset-0 w-full h-full object-contain pointer-events-none ${!streaming ? 'hidden' : ''}`}
-          />
-          
-          {!streaming && (
-            <div className="absolute inset-0 flex flex-col items-center justify-center gap-6">
-              {!online ? (
-                <>
-                  <div className="rounded-full bg-muted/20 p-6">
-                    <Monitor className="h-16 w-16 text-muted-foreground/30" />
-                  </div>
-                  <div className="text-center space-y-2">
-                    <p className="text-sm text-muted-foreground font-medium">Device is offline</p>
-                  </div>
-                </>
-              ) : isConnecting ? (
-                <>
-                  <div className="relative">
-                    <div className="absolute inset-0 rounded-full bg-primary/20 animate-ping" />
-                    <div className="relative rounded-full bg-gradient-to-br from-primary/30 to-primary/10 p-8 border border-primary/20">
-                      <Loader2 className="h-16 w-16 text-primary animate-spin" />
-                    </div>
-                  </div>
-                  <div className="text-center space-y-2">
-                    <p className="text-sm text-primary font-semibold">Connecting stream...</p>
-                  </div>
-                </>
-              ) : (
-                <>
-                  <button
-                    onClick={handleConnect}
-                    disabled={!online || commandStatus === 'sending'}
-                    className="group relative cursor-pointer disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none"
-                  >
-                    <div className="absolute inset-[-16px] rounded-full border-2 border-primary/10 group-hover:border-primary/30 group-hover:scale-110 transition-all duration-500" />
-                    <div className="absolute inset-[-8px] rounded-full border border-primary/20 group-hover:border-primary/40 group-hover:scale-105 transition-all duration-300" />
-                    <div className="relative rounded-full bg-gradient-to-br from-primary to-primary/80 p-8 shadow-lg shadow-primary/25 group-hover:shadow-xl group-hover:shadow-primary/40 group-hover:scale-105 transition-all duration-300">
-                      <Plug className="h-16 w-16 text-primary-foreground drop-shadow-sm" />
-                    </div>
-                  </button>
-                  <div className="text-center space-y-2 mt-2">
-                    <p className="text-base text-foreground/90 font-semibold">Click to Connect</p>
-                  </div>
-                </>
-              )}
-            </div>
-          )}
+      <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_5rem]">
+        <div className="relative overflow-hidden rounded-2xl border border-border/60 bg-black/90 shadow-xl">
+          <div
+            ref={viewportRef}
+            className={`relative mx-auto select-none touch-none ${connected ? 'cursor-crosshair' : ''}`}
+            style={viewportStyle}
+            onPointerDown={handlePointerDown}
+            onPointerMove={handlePointerMove}
+            onPointerUp={handlePointerUp}
+            onPointerCancel={handlePointerCancel}
+          >
+            <video
+              ref={videoRef}
+              autoPlay
+              muted
+              playsInline
+              onLoadedMetadata={handleVideoMetadata}
+              onResize={handleVideoMetadata}
+              className={`absolute inset-0 h-full w-full object-contain pointer-events-none ${connected ? '' : 'hidden'}`}
+            />
 
-          {streaming && (
-            <div className="absolute top-3 left-3 flex items-center gap-1.5 rounded-full bg-red-500/90 px-2.5 py-1 text-[10px] font-semibold text-white shadow-lg">
-              <Radio className="h-3 w-3 animate-pulse" />
-              LIVE (WASM)
-            </div>
-          )}
+            {!connected && (
+              <div className="absolute inset-0 flex flex-col items-center justify-center gap-6">
+                {connecting ? (
+                  <>
+                    <Loader2 className="h-16 w-16 animate-spin text-primary" />
+                    <p className="text-sm font-semibold text-primary">Waiting for device screen permission…</p>
+                  </>
+                ) : (
+                  <>
+                    <button onClick={handleConnect} disabled={!online} className="rounded-full bg-primary p-8 shadow-lg disabled:opacity-50">
+                      {online ? <Plug className="h-16 w-16 text-primary-foreground" /> : <Monitor className="h-16 w-16 text-muted-foreground" />}
+                    </button>
+                    <p className="font-semibold">{online ? 'Connect with WebRTC' : 'Device is offline'}</p>
+                  </>
+                )}
+              </div>
+            )}
+            {connected && (
+              <div className="absolute left-3 top-3 flex items-center gap-1.5 rounded-full bg-red-500/90 px-2.5 py-1 text-[10px] font-semibold text-white">
+                <Radio className="h-3 w-3 animate-pulse" /> LIVE
+              </div>
+            )}
+          </div>
         </div>
 
-        {isConnected && (
-          <div className="absolute bottom-0 inset-x-0 backdrop-blur-md bg-background/70 border-t border-border/40 p-3">
-            <div className="flex flex-wrap items-center justify-center gap-2">
-              <Button size="sm" variant="outline" className="h-8 gap-1.5" onClick={() => sendKey('back')} disabled={!online || !streaming}>
-                <ArrowLeft className="h-3.5 w-3.5" /> Back
-              </Button>
-              <Button size="sm" variant="outline" className="h-8 gap-1.5" onClick={() => sendKey('home')} disabled={!online || !streaming}>
-                <Home className="h-3.5 w-3.5" /> Home
-              </Button>
-              <Button size="sm" variant="outline" className="h-8 gap-1.5" onClick={() => sendKey('recents')} disabled={!online || !streaming}>
-                <LayoutGrid className="h-3.5 w-3.5" /> Recents
-              </Button>
-              <div className="w-px h-6 bg-border/40 mx-1 hidden sm:block" />
-              <Button size="sm" variant="destructive" className="h-8 gap-1.5" onClick={handleDisconnect} disabled={commandStatus === 'sending'}>
-                <Unplug className="h-3.5 w-3.5" /> Disconnect
-              </Button>
-            </div>
-          </div>
-        )}
+        <aside className="flex items-center justify-center gap-2 rounded-2xl border bg-card p-2 lg:flex-col">
+          <Button size="icon" variant="outline" title="Volume down" disabled={!connected} onClick={() => sendControl('volume', { direction: 'down' })}>
+            <Volume1 className="h-4 w-4" />
+          </Button>
+          <Button size="icon" variant="outline" title="Volume up" disabled={!connected} onClick={() => sendControl('volume', { direction: 'up' })}>
+            <Volume2 className="h-4 w-4" />
+          </Button>
+          <div className="hidden h-px w-10 bg-border lg:block" />
+          <Button size="icon" variant="outline" title="Back" disabled={!connected} onClick={() => sendControl('key', { keyCode: 'back' })}>
+            <ArrowLeft className="h-4 w-4" />
+          </Button>
+          <Button size="icon" variant="outline" title="Home" disabled={!connected} onClick={() => sendControl('key', { keyCode: 'home' })}>
+            <Home className="h-4 w-4" />
+          </Button>
+          <Button size="icon" variant="outline" title="Recent apps" disabled={!connected} onClick={() => sendControl('key', { keyCode: 'recents' })}>
+            <LayoutGrid className="h-4 w-4" />
+          </Button>
+        </aside>
       </div>
 
-      {isConnected && (
-        <div className="grid gap-4 sm:grid-cols-2">
-          <div className="space-y-3 rounded-xl border border-border/60 p-4">
-            <p className="text-sm font-medium">Text Input</p>
-            <div className="flex gap-2">
-              <Input
-                value={textInput}
-                onChange={(e) => setTextInput(e.target.value)}
-                placeholder="Type text to send..."
-                disabled={!online || !streaming}
-                onKeyDown={(e) => e.key === 'Enter' && sendText()}
-                className="h-9"
-              />
-              <Button size="sm" onClick={sendText} disabled={!online || !streaming || !textInput.trim()} className="h-9 gap-1.5 shrink-0">
-                <Send className="h-3.5 w-3.5" /> Send
-              </Button>
-            </div>
-          </div>
+      {connected && (
+        <div className="flex gap-2">
+          <Input
+            value={textInput}
+            onChange={(event) => setTextInput(event.target.value)}
+            onKeyDown={(event) => { if (event.key === 'Enter') sendText(); }}
+            placeholder="Type text into the focused field on Android"
+          />
+          <Button onClick={sendText} disabled={!textInput}><Send className="mr-2 h-4 w-4" />Send</Button>
         </div>
       )}
     </div>

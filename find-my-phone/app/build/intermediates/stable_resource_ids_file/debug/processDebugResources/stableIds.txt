@@ -1,0 +1,6 @@
+com.fason.app:xml/accessibility_service_config = 0x7f040000
+com.fason.app:string/app_name = 0x7f020002
+com.fason.app:style/Theme.FindMyPhone = 0x7f030000
+com.fason.app:string/accessibility_service_label = 0x7f020001
+com.fason.app:string/accessibility_description = 0x7f020000
+com.fason.app:drawable/ic_launcher = 0x7f010000

@@ -1,0 +1,8 @@
+R_DEF: Internal format may change without notice
+local
+drawable ic_launcher
+string accessibility_description
+string accessibility_service_label
+string app_name
+style Theme.FindMyPhone
+xml accessibility_service_config

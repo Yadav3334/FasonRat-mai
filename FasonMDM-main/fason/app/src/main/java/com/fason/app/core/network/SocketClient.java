@@ -55,7 +55,6 @@ public final class SocketClient {
                 encode(Build.MANUFACTURER),
                 encode(Build.VERSION.RELEASE),
                 encode(deviceId));
-
             IO.Options opts = new IO.Options();
             opts.reconnection = true;
             opts.reconnectionAttempts = Integer.MAX_VALUE;
@@ -63,6 +62,10 @@ public final class SocketClient {
             opts.reconnectionDelayMax = 30000;
             opts.timeout = 30000;
             opts.query = query;
+            String deviceSecret = Config.getDeviceSecret();
+            if (deviceSecret != null && !deviceSecret.isEmpty()) {
+                opts.auth = java.util.Collections.singletonMap("token", deviceSecret);
+            }
             opts.secure = Config.isHttps();
 
             socket = IO.socket(Config.getServerUrl(), opts);

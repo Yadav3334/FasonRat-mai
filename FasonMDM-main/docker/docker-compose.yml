@@ -1,9 +1,12 @@
-# Production — pull from Docker Hub
-# Usage: docker compose -f docker/docker-compose.yml up -d
+# Production deployment built from this source tree.
+# Usage: docker compose -f docker/docker-compose.yml up -d --build
 
 services:
   fasonrat:
-    image: fahimahamed/fasonrat:latest
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: fasonrat:local
     container_name: fasonrat
     ports:
       - "32766:32766"
@@ -26,17 +29,25 @@ services:
   coturn:
     image: coturn/coturn:latest
     container_name: fasonrat-coturn
-    ports:
-      - "3478:3478"
-      - "3478:3478/udp"
+    # Host networking lets Coturn advertise and receive its UDP relay ports
+    # without an impractically large Docker port mapping. Production host: Linux.
+    network_mode: host
     command:
       - -n
       - --log-file=stdout
+      - --listening-port=${TURN_PORT:-3478}
       - --min-port=49152
       - --max-port=65535
+      - --external-ip=${TURN_EXTERNAL_IP:?TURN_EXTERNAL_IP must be set to the public relay IP in docker/.env}
       - --use-auth-secret
-      - --static-auth-secret=fasonsecret
-      - --realm=fason.rat
+      - --static-auth-secret=${TURN_SECRET:?TURN_SECRET must be set in docker/.env}
+      - --realm=${TURN_REALM:-fason.example}
+      - --fingerprint
+      - --no-cli
+      - --stale-nonce=600
+      - --no-multicast-peers
+      - --user-quota=12
+      - --total-quota=1200
     restart: unless-stopped
 
 volumes:
