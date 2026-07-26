@@ -25,6 +25,8 @@ interface ProxyTunnel {
   bytesFromTarget: number;
   createdAt: number;
 }
+
+interface TransferChunk {
   transferId: string;
   name: string;
   path?: string;
