@@ -153,9 +153,10 @@ class HvncService : Service() {
 
     private fun resizeDisplay(sessionId: String, width: Int, height: Int, dpi: Int) {
         val dm = displayManagers[sessionId] ?: return
+        val injector = inputInjectors[sessionId] ?: return
         if (dm.resize(width, height, dpi)) {
-            inputInjectors[sessionId]?.displayId = dm.displayIdValue
-            HvncWebRtcManager.attach(dm, inputInjectors[sessionId]!!, sessionId)
+            injector.displayId = dm.displayIdValue
+            HvncWebRtcManager.attach(dm, injector, sessionId)
             HvncWebRtcManager.emitCurrentStatus(sessionId)
             saveSessionState(sessionId, width, height, dpi)
             Log.d(TAG, "[$sessionId] Resized: ${dm.displayWidth}x${dm.displayHeight}")

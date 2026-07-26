@@ -78,6 +78,11 @@ object HvncSecurityManager {
     }
 
     // ─── Mã hóa/Giải mã Control Message ───────────────────────────
+    //
+    //  LƯU Ý: Hiện tại WebRTC DataChannel dùng DTLS-SRTP để bảo vệ transport
+    //  layer nên các hàm encryptMessage/decryptMessage chưa được gọi.
+    //  Chúng sẵn sàng để kích hoạt app-layer encryption khi cần bảo vệ
+    //  thêm trước MITM ở tầng TURN relay hoặc khi DTLS bị downgrade.
 
     /**
      * Mã hóa control message trước khi gửi qua DataChannel.
@@ -181,6 +186,9 @@ object HvncSecurityManager {
     }
 
     // ─── Anti-Replay Protection ────────────────────────────────────
+    //
+    //  LƯU Ý: validateSequence chưa được wire vào DataChannel handler.
+    //  Sẽ kích hoạt cùng lúc với app-layer encryption (xem comment trên).
 
     /**
      * Kiểm tra và cập nhật sequence number.

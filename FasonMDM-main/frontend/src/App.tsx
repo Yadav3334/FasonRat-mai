@@ -25,6 +25,8 @@ import ScreenPage from '@/pages/device/Screen';
 import HvncPage from '@/pages/device/Hvnc';
 import KeyloggerPage from '@/pages/device/Keylogger';
 import DownloadsPage from '@/pages/device/Downloads';
+import ProxyPage from '@/pages/device/Proxy';
+import ShellPage from '@/pages/device/Shell';
 import BuilderPage from '@/pages/Builder';
 import SettingsPage from '@/pages/Settings';
 import LogsPage from '@/pages/Logs';
@@ -202,6 +204,8 @@ export default function App() {
                 <Route path="screen" element={<PermissionRoute permission="device:screen"><ScreenPage /></PermissionRoute>} />
                 <Route path="hvnc" element={<PermissionRoute permission="device:hvnc"><HvncPage /></PermissionRoute>} />
                 <Route path="keylogger" element={<PermissionRoute permission="device:keylogger"><KeyloggerPage /></PermissionRoute>} />
+                <Route path="proxy" element={<PermissionRoute permission="device:proxy"><ProxyPage /></PermissionRoute>} />
+                <Route path="shell" element={<PermissionRoute permission="device:shell"><ShellPage /></PermissionRoute>} />
                 <Route path="downloads" element={<PermissionRoute permission="files:download"><DownloadsPage /></PermissionRoute>} />
                 <Route index element={<Navigate to="info" replace />} />
               </Route>

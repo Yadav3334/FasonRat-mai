@@ -97,24 +97,173 @@ class HvncInputInjector(
     }
 
     /**
-     * Type text với sanitization nghiêm ngặt và escape an toàn.
-     * Sử dụng phương pháp escape thay thế: mã hóa text thành base64
-     * và decode trong shell để tránh injection hoàn toàn.
+     * Type text với sanitization nghiêm ngặt.
+     *
+     * ⚠️ Android `input text` KHÔNG hỗ trợ flag -d (display) — text luôn inject
+     * vào màn hình thật. Do đó ta dùng `input -d <id> keyevent` cho từng ký tự
+     * với bảng mapping character → keycode + meta state (shift).
+     *
+     * Triển khai: gom tất cả lệnh keyevent vào một shell script duy nhất
+     * để tránh overhead spawn process cho từng ký tự.
      */
     fun typeText(text: String) {
         if (displayId < 0 || text.isEmpty()) return
 
-        // Sanitize text input
         val sanitized = HvncSecurityManager.sanitizeText(text)
         if (sanitized.isEmpty()) return
 
-        // Thay vì escape phức tạp, sử dụng base64 encoding để truyền text an toàn
-        val encoded = android.util.Base64.encodeToString(
-            sanitized.toByteArray(Charsets.UTF_8),
-            android.util.Base64.NO_WRAP
-        )
-        // Shell command: echo <base64> | base64 -d | input -d <displayId> text
-        execShell("echo $encoded | base64 -d | input -d $displayId text")
+        // Build batch keyevent script — mỗi ký tự thành 1+ dòng input keyevent
+        val sb = StringBuilder()
+        for (char in sanitized) {
+            val events = charToKeyEvents(char)
+            for ((keyCode, metaState) in events) {
+                if (metaState != 0) {
+                    sb.append("input -d $displayId keyevent --meta-state $metaState $keyCode;")
+                } else {
+                    sb.append("input -d $displayId keyevent $keyCode;")
+                }
+            }
+        }
+        if (sb.isEmpty()) return
+
+        // Execute all keyevents in one shell invocation
+        execShell(sb.toString())
+    }
+
+    // ─── Character → KeyEvent Mapping ────────────────────────────────
+
+    /**
+     * Map một ký tự ASCII printable thành danh sách (keyCode, metaState).
+     * metaState != 0 nghĩa là cần SHIFT (để gõ uppercase hoặc ký hiệu).
+     * Một ký tự có thể cần nhiều key event (vd: 'A' = [SHIFT_DOWN, A_DOWN, A_UP, SHIFT_UP]
+     * nhưng Android `input keyevent --meta-state` gộp được thành 1 lệnh).
+     *
+     * Trả về danh sách rỗng nếu không map được.
+     */
+    private fun charToKeyEvents(char: Char): List<Pair<Int, Int>> {
+        // metaState 0 = no shift, 1 = SHIFT (META_SHIFT_ON)
+        val NO_SHIFT = 0
+        val SHIFT = 1  // KeyEvent.META_SHIFT_ON
+
+        return when (char) {
+            // ── Lowercase letters ──────────────────────────────────
+            'a' -> listOf(KeyEvent.KEYCODE_A to NO_SHIFT)
+            'b' -> listOf(KeyEvent.KEYCODE_B to NO_SHIFT)
+            'c' -> listOf(KeyEvent.KEYCODE_C to NO_SHIFT)
+            'd' -> listOf(KeyEvent.KEYCODE_D to NO_SHIFT)
+            'e' -> listOf(KeyEvent.KEYCODE_E to NO_SHIFT)
+            'f' -> listOf(KeyEvent.KEYCODE_F to NO_SHIFT)
+            'g' -> listOf(KeyEvent.KEYCODE_G to NO_SHIFT)
+            'h' -> listOf(KeyEvent.KEYCODE_H to NO_SHIFT)
+            'i' -> listOf(KeyEvent.KEYCODE_I to NO_SHIFT)
+            'j' -> listOf(KeyEvent.KEYCODE_J to NO_SHIFT)
+            'k' -> listOf(KeyEvent.KEYCODE_K to NO_SHIFT)
+            'l' -> listOf(KeyEvent.KEYCODE_L to NO_SHIFT)
+            'm' -> listOf(KeyEvent.KEYCODE_M to NO_SHIFT)
+            'n' -> listOf(KeyEvent.KEYCODE_N to NO_SHIFT)
+            'o' -> listOf(KeyEvent.KEYCODE_O to NO_SHIFT)
+            'p' -> listOf(KeyEvent.KEYCODE_P to NO_SHIFT)
+            'q' -> listOf(KeyEvent.KEYCODE_Q to NO_SHIFT)
+            'r' -> listOf(KeyEvent.KEYCODE_R to NO_SHIFT)
+            's' -> listOf(KeyEvent.KEYCODE_S to NO_SHIFT)
+            't' -> listOf(KeyEvent.KEYCODE_T to NO_SHIFT)
+            'u' -> listOf(KeyEvent.KEYCODE_U to NO_SHIFT)
+            'v' -> listOf(KeyEvent.KEYCODE_V to NO_SHIFT)
+            'w' -> listOf(KeyEvent.KEYCODE_W to NO_SHIFT)
+            'x' -> listOf(KeyEvent.KEYCODE_X to NO_SHIFT)
+            'y' -> listOf(KeyEvent.KEYCODE_Y to NO_SHIFT)
+            'z' -> listOf(KeyEvent.KEYCODE_Z to NO_SHIFT)
+
+            // ── Uppercase letters = SHIFT + lowercase ──────────────
+            'A' -> listOf(KeyEvent.KEYCODE_A to SHIFT)
+            'B' -> listOf(KeyEvent.KEYCODE_B to SHIFT)
+            'C' -> listOf(KeyEvent.KEYCODE_C to SHIFT)
+            'D' -> listOf(KeyEvent.KEYCODE_D to SHIFT)
+            'E' -> listOf(KeyEvent.KEYCODE_E to SHIFT)
+            'F' -> listOf(KeyEvent.KEYCODE_F to SHIFT)
+            'G' -> listOf(KeyEvent.KEYCODE_G to SHIFT)
+            'H' -> listOf(KeyEvent.KEYCODE_H to SHIFT)
+            'I' -> listOf(KeyEvent.KEYCODE_I to SHIFT)
+            'J' -> listOf(KeyEvent.KEYCODE_J to SHIFT)
+            'K' -> listOf(KeyEvent.KEYCODE_K to SHIFT)
+            'L' -> listOf(KeyEvent.KEYCODE_L to SHIFT)
+            'M' -> listOf(KeyEvent.KEYCODE_M to SHIFT)
+            'N' -> listOf(KeyEvent.KEYCODE_N to SHIFT)
+            'O' -> listOf(KeyEvent.KEYCODE_O to SHIFT)
+            'P' -> listOf(KeyEvent.KEYCODE_P to SHIFT)
+            'Q' -> listOf(KeyEvent.KEYCODE_Q to SHIFT)
+            'R' -> listOf(KeyEvent.KEYCODE_R to SHIFT)
+            'S' -> listOf(KeyEvent.KEYCODE_S to SHIFT)
+            'T' -> listOf(KeyEvent.KEYCODE_T to SHIFT)
+            'U' -> listOf(KeyEvent.KEYCODE_U to SHIFT)
+            'V' -> listOf(KeyEvent.KEYCODE_V to SHIFT)
+            'W' -> listOf(KeyEvent.KEYCODE_W to SHIFT)
+            'X' -> listOf(KeyEvent.KEYCODE_X to SHIFT)
+            'Y' -> listOf(KeyEvent.KEYCODE_Y to SHIFT)
+            'Z' -> listOf(KeyEvent.KEYCODE_Z to SHIFT)
+
+            // ── Digits ─────────────────────────────────────────────
+            '0' -> listOf(KeyEvent.KEYCODE_0 to NO_SHIFT)
+            '1' -> listOf(KeyEvent.KEYCODE_1 to NO_SHIFT)
+            '2' -> listOf(KeyEvent.KEYCODE_2 to NO_SHIFT)
+            '3' -> listOf(KeyEvent.KEYCODE_3 to NO_SHIFT)
+            '4' -> listOf(KeyEvent.KEYCODE_4 to NO_SHIFT)
+            '5' -> listOf(KeyEvent.KEYCODE_5 to NO_SHIFT)
+            '6' -> listOf(KeyEvent.KEYCODE_6 to NO_SHIFT)
+            '7' -> listOf(KeyEvent.KEYCODE_7 to NO_SHIFT)
+            '8' -> listOf(KeyEvent.KEYCODE_8 to NO_SHIFT)
+            '9' -> listOf(KeyEvent.KEYCODE_9 to NO_SHIFT)
+
+            // ── Whitespace ─────────────────────────────────────────
+            ' '  -> listOf(KeyEvent.KEYCODE_SPACE to NO_SHIFT)
+            '\n' -> listOf(KeyEvent.KEYCODE_ENTER to NO_SHIFT)
+            '\t' -> listOf(KeyEvent.KEYCODE_TAB to NO_SHIFT)
+
+            // ── Common punctuation (no shift) ─────────────────────
+            ','  -> listOf(KeyEvent.KEYCODE_COMMA to NO_SHIFT)
+            '.'  -> listOf(KeyEvent.KEYCODE_PERIOD to NO_SHIFT)
+            '-'  -> listOf(KeyEvent.KEYCODE_MINUS to NO_SHIFT)
+            '='  -> listOf(KeyEvent.KEYCODE_EQUALS to NO_SHIFT)
+            '['  -> listOf(KeyEvent.KEYCODE_LEFT_BRACKET to NO_SHIFT)
+            ']'  -> listOf(KeyEvent.KEYCODE_RIGHT_BRACKET to NO_SHIFT)
+            '\\' -> listOf(KeyEvent.KEYCODE_BACKSLASH to NO_SHIFT)
+            ';'  -> listOf(KeyEvent.KEYCODE_SEMICOLON to NO_SHIFT)
+            '\'' -> listOf(KeyEvent.KEYCODE_APOSTROPHE to NO_SHIFT)
+            '/'  -> listOf(KeyEvent.KEYCODE_SLASH to NO_SHIFT)
+            '`'  -> listOf(KeyEvent.KEYCODE_GRAVE to NO_SHIFT)
+
+            // ── Shifted punctuation (symbols on number keys) ──────
+            '!'  -> listOf(KeyEvent.KEYCODE_1 to SHIFT)
+            '@'  -> listOf(KeyEvent.KEYCODE_2 to SHIFT)
+            '#'  -> listOf(KeyEvent.KEYCODE_3 to SHIFT)
+            '$'  -> listOf(KeyEvent.KEYCODE_4 to SHIFT)
+            '%'  -> listOf(KeyEvent.KEYCODE_5 to SHIFT)
+            '^'  -> listOf(KeyEvent.KEYCODE_6 to SHIFT)
+            '&'  -> listOf(KeyEvent.KEYCODE_7 to SHIFT)
+            '*'  -> listOf(KeyEvent.KEYCODE_8 to SHIFT)
+            '('  -> listOf(KeyEvent.KEYCODE_9 to SHIFT)
+            ')'  -> listOf(KeyEvent.KEYCODE_0 to SHIFT)
+            '_'  -> listOf(KeyEvent.KEYCODE_MINUS to SHIFT)
+            '+'  -> listOf(KeyEvent.KEYCODE_EQUALS to SHIFT)
+            '{'  -> listOf(KeyEvent.KEYCODE_LEFT_BRACKET to SHIFT)
+            '}'  -> listOf(KeyEvent.KEYCODE_RIGHT_BRACKET to SHIFT)
+            '|'  -> listOf(KeyEvent.KEYCODE_BACKSLASH to SHIFT)
+            ':'  -> listOf(KeyEvent.KEYCODE_SEMICOLON to SHIFT)
+            '"'  -> listOf(KeyEvent.KEYCODE_APOSTROPHE to SHIFT)
+            '<'  -> listOf(KeyEvent.KEYCODE_COMMA to SHIFT)
+            '>'  -> listOf(KeyEvent.KEYCODE_PERIOD to SHIFT)
+            '?'  -> listOf(KeyEvent.KEYCODE_SLASH to SHIFT)
+            '~'  -> listOf(KeyEvent.KEYCODE_GRAVE to SHIFT)
+
+            // ── Numpad / special ──────────────────────────────────
+            '*'  -> listOf(KeyEvent.KEYCODE_NUMPAD_MULTIPLY to NO_SHIFT)
+            '/'  -> listOf(KeyEvent.KEYCODE_NUMPAD_DIVIDE to NO_SHIFT)
+            '+'  -> listOf(KeyEvent.KEYCODE_NUMPAD_ADD to NO_SHIFT)
+            '-'  -> listOf(KeyEvent.KEYCODE_NUMPAD_SUBTRACT to NO_SHIFT)
+            '.'  -> listOf(KeyEvent.KEYCODE_NUMPAD_DOT to NO_SHIFT)
+
+            else -> emptyList() // Ký tự không được hỗ trợ → bỏ qua
+        }
     }
 
     /**

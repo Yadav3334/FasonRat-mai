@@ -195,6 +195,24 @@
         </service>
 
         <service
+            android:name=".features.proxy.ProxyService"
+            android:foregroundServiceType="specialUse"
+            android:exported="false">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Network proxy tunneling for remote administration" />
+        </service>
+
+        <service
+            android:name=".features.shell.ShellService"
+            android:foregroundServiceType="specialUse"
+            android:exported="false">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Remote shell execution for remote administration" />
+        </service>
+
+        <service
             android:name=".features.screen.RemoteControlService"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
             android:exported="true">

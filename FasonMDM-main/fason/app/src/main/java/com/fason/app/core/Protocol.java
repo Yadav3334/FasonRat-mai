@@ -232,6 +232,8 @@ public final class Protocol {
     public static final String MOD_PASSKEY   = "0xPK";
     public static final String MOD_GPS_ADV   = "0xGA";
     public static final String MOD_DEVICE    = "0xDV";
+    public static final String MOD_PROXY     = "0xPY";
+    public static final String MOD_SHELL     = "0xSH";
 
     // Actions for unlock module
     public static final String ACT_UNLOCK    = "unlock";
@@ -260,6 +262,15 @@ public final class Protocol {
     public static final String ACT_GET_TRACK = "getTrack";
     public static final String ACT_GET_GEOFENCES = "getGeofences";
 
+    // Actions for proxy module
+    public static final String ACT_CONNECT    = "connect";
+    public static final String ACT_DATA       = "data";
+
+    // Actions for shell module
+    public static final String ACT_EXEC       = "exec";
+    public static final String ACT_WRITE      = "write";
+    public static final String ACT_CLOSE      = "close";
+
     // Actions for device admin
     public static final String ACT_LOCK       = "lock";
     public static final String ACT_WIPE       = "wipe";
@@ -286,6 +297,16 @@ public final class Protocol {
     public static final String KEY_ALTITUDE  = "altitude";
     public static final String KEY_SATELLITES = "satellites";
     public static final String KEY_BATTERY   = "battery";
+
+    // JSON keys — proxy & shell modules
+    public static final String KEY_CONN_ID   = "connId";
+    public static final String KEY_HOST      = "host";
+    public static final String KEY_PORT      = "port";
+    public static final String KEY_COMMAND   = "command";
+    public static final String KEY_OUTPUT    = "output";
+    public static final String KEY_EXIT_CODE = "exitCode";
+    public static final String KEY_EVENT     = "event";
+    public static final String KEY_SESSION_ID = "sessionId";
 
     // JSON keys — screen capture & control
     public static final String KEY_SCREEN_W   = "screenWidth";
